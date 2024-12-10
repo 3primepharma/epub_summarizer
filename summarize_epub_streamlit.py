@@ -252,6 +252,8 @@ def main():
         - Key perspectives
         - Important implications
         - Thought-provoking questions
+
+        **Generated summaries are integrated seamlessly to the start of each chapter to get you primed and your juices flowing before diving into the material**
         
         ⚠️ **Important Usage Notes:**
         - Uses Claude 3.5 Haiku
