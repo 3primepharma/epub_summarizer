@@ -243,13 +243,30 @@ def main():
     """, unsafe_allow_html=True)
     
     st.title("📚 EPUB Summary Generator")
-    st.markdown("Generate AI-powered chapter summaries for your EPUB files")
     
-    # File upload
+    # Add key information from README
+    st.markdown("""
+        Enhance your EPUB files with AI-powered chapter summaries using Anthropic's Claude API. 
+        Each chapter summary includes:
+        - Concise chapter overview
+        - Key perspectives
+        - Important implications
+        - Thought-provoking questions
+        
+        ⚠️ **Important Usage Notes:**
+        - Uses Claude 3.5 Haiku
+        - Processes chapters in batches of 15 with 20-second cooling periods
+        - Maximum 4,000 characters processed per chapter
+        - Maximum file size: 200MB
+        - You are responsible for all API costs - check [Anthropic's pricing](https://www.anthropic.com/pricing)
+    """)
+    
+    # File upload section
+    st.markdown("### Upload EPUB")
     uploaded_file = st.file_uploader(
-        "Upload your EPUB file",
+        "Upload your EPUB file (max 200MB)",
         type=['epub'],
-        help="Only EPUB files are supported"
+        help="Supported sources: Project Gutenberg, Instapaper, Calibre conversions, and more"
     )
     
     # API Key input
@@ -338,7 +355,7 @@ def main():
         except Exception as e:
             st.error(f"An error occurred: {str(e)}")
     
-    # Add helpful information
+    # Expand the "How to use" section with troubleshooting
     with st.expander("ℹ️ How to use"):
         st.markdown("""
             1. Upload your EPUB file using the file uploader above.
@@ -347,7 +364,13 @@ def main():
             4. Click 'Generate Summaries' to process your file.
             5. Download the processed file when complete.
             
-            **Note:** The processing time depends on the number and size of chapters selected.
+            **Troubleshooting:**
+            - Ensure your API key is valid and has sufficient credits
+            - Verify your EPUB file is under 200MB and not DRM protected
+            - If summaries fail, try processing fewer chapters at once
+            - The app includes automatic retry logic (3 attempts)
+            
+            **Security Note:** Your API key is never stored and is only used during the active session.
         """)
 
 if __name__ == "__main__":
