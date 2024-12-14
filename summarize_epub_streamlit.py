@@ -12,15 +12,16 @@ import asyncio
 from concurrent.futures import ThreadPoolExecutor
 
 class EPUBSummaryInserter:
-    def __init__(self, api_key: str):
+    def __init__(self, api_key: str, chars_per_chapter: int):
         if not api_key:
             raise ValueError("ANTHROPIC_API_KEY is required")
         self.client = anthropic.Anthropic(api_key=api_key)
+        self.chars_per_chapter = chars_per_chapter
 
-    def extract_chapters(self, epub_file_path: str) -> List[Tuple[str, str, str]]:
+    def extract_chapters(self, epub_file_path: str) -> List[Tuple[str, str, str, int]]:
         """
         Extract chapters from EPUB file.
-        Returns list of tuples: (chapter_id, title, content)
+        Returns list of tuples: (chapter_id, title, content, char_count)
         """
         book = epub.read_epub(epub_file_path)
         chapters = []
@@ -30,11 +31,14 @@ class EPUBSummaryInserter:
                 soup = BeautifulSoup(item.get_content(), 'html.parser')
                 title = soup.find(['h1', 'h2'])
                 title = title.get_text().strip() if title else "Untitled Chapter"
-                chapters.append((item.id, title, str(soup)))
+                content = str(soup)
+                # Get actual character count of cleaned text
+                char_count = len(BeautifulSoup(content, 'html.parser').get_text())
+                chapters.append((item.id, title, content, char_count))
         
         return chapters
 
-    def get_chapter_summary(self, content: str) -> str:
+    async def get_chapter_summary(self, content: str) -> str:
         """Get AI-generated summary for chapter content"""
         # Create a container for status messages that will be overwritten
         status_container = st.empty()
@@ -46,7 +50,7 @@ class EPUBSummaryInserter:
 
 Here is the chapter text:
 <chapter_text>
-{text[:4000]}  # Limiting text length for API
+{text[:self.chars_per_chapter]}  # Using dynamic character limit
 </chapter_text>
 
 Please follow these steps to create the digest:
@@ -84,9 +88,8 @@ Food For Thought
         max_retries = 3
         for attempt in range(max_retries):
             try:
-                # Update logging to use status container
                 status_container.info(f'Attempt {attempt + 1}/{max_retries}: Generating summary...')
-                time.sleep(5)
+                await asyncio.sleep(5)
                 
                 response = self.client.messages.create(
                     model="claude-3-5-haiku-20241022",
@@ -113,7 +116,7 @@ Food For Thought
             except Exception as e:
                 if attempt < max_retries - 1:
                     status_container.warning(f"Attempt {attempt + 1} failed: {str(e)}. Retrying...")
-                    time.sleep(5)
+                    await asyncio.sleep(5)
                 else:
                     status_container.error(f"All {max_retries} attempts failed for chapter summary. Skipping...")
                     return ""
@@ -155,15 +158,39 @@ Food For Thought
         
         return str(soup)
 
-    async def process_selected_chapters(self, selected_indices: List[int], chapters: List[Tuple[str, str, str]], book: epub.EpubBook) -> bytes:
+    async def process_selected_chapters(self, selected_indices: List[int], chapters: List[Tuple[str, str, str, int]], book: epub.EpubBook, batch_size: int, batch_wait: int) -> bytes:
         """Process and insert summaries for selected chapters in parallel batches"""
-        valid_indices = [i for i in selected_indices if 0 <= i < len(chapters)]
-        if len(valid_indices) != len(selected_indices):
-            st.warning(f"Some selected chapter indices were invalid and will be skipped. Valid: {len(valid_indices)}/{len(selected_indices)}")
+        # Filter out chapters that are too short (less than 400 characters)
+        valid_indices = [i for i in selected_indices if 0 <= i < len(chapters) and chapters[i][3] >= 800]
+        
+        if len(valid_indices) < len(selected_indices):
+            skipped_count = len(selected_indices) - len(valid_indices)
+            st.warning(f"Skipping {skipped_count} chapter(s) that are too short (less than 800 characters)")
         
         if not valid_indices:
-            raise ValueError("No valid chapters selected for processing")
+            st.error("No valid chapters to process after filtering out short chapters")
+            return None
 
+        # Calculate total characters for selected chapters
+        total_chars = sum(min(chapters[i][3], self.chars_per_chapter) for i in valid_indices)
+        avg_chars_per_chapter = total_chars / len(valid_indices) if valid_indices else 0
+        
+        # Adjust batch size based on actual content size
+        adjusted_batch_size = min(
+            batch_size,
+            int(self.chars_per_chapter * batch_size / max(avg_chars_per_chapter, 1))
+        )
+        
+        # Adjust wait time proportionally
+        adjusted_wait = max(5, int(batch_wait * avg_chars_per_chapter / self.chars_per_chapter))
+        
+        st.info(f"""
+            Optimized Processing Parameters:
+            - Average characters per chapter: {int(avg_chars_per_chapter):,}
+            - Adjusted batch size: {adjusted_batch_size} chapters
+            - Adjusted wait time: {adjusted_wait} seconds
+        """)
+        
         progress_bar = st.progress(0)
         current_batch = st.empty()
         
@@ -171,14 +198,14 @@ Food For Thought
             st.markdown("### Processing Status")
             status_container = st.empty()
         
-        BATCH_SIZE = 15
-        BATCH_WAIT = 20  # seconds
+        BATCH_SIZE = adjusted_batch_size
+        BATCH_WAIT = adjusted_wait  # seconds
         processed_chapters = 0
         
         async def process_chapter(i: int) -> Tuple[str, str, bool]:
-            chapter_id, title, content = chapters[i]
+            chapter_id, title, content, _ = chapters[i]
             try:
-                summary = self.get_chapter_summary(content)
+                summary = await self.get_chapter_summary(content)
                 if summary:
                     modified_content = self.insert_summary(content, summary)
                     return (chapter_id, modified_content, True)
@@ -276,27 +303,82 @@ def main():
         help="Your API key will not be stored"
     )
     
+    # Add API tier selection
+    tier_options = {
+        "Low (100k chars/min)": {"chars_per_min": 100000, "rpm": 45},
+        "Medium (200k chars/min)": {"chars_per_min": 200000, "rpm": 500},
+        "High (400k chars/min)": {"chars_per_min": 400000, "rpm": 1500}
+    }
+    selected_tier = st.selectbox(
+        "Select your Anthropic API tier",
+        options=list(tier_options.keys()),
+        index=0,
+        help="Choose based on your Anthropic API tier limits"
+    )
+
+    # Add text length selection
+    length_options = {
+        "Short (1-2 pages, 4k chars)": 4000,
+        "Medium (<15 pages, 20k chars)": 20000,
+        "Long (15-30 pages, 40k chars)": 40000,
+        "Long (30-50 pages, 100k chars)": 100000
+    }
+    selected_length = st.selectbox(
+        "Select text length per chapter",
+        options=list(length_options.keys()),
+        index=0,
+        help="Choose based on your typical chapter length"
+    )
+
     if uploaded_file and api_key:
         try:
-            # Reset the pointer of the uploaded_file to the beginning
-            uploaded_file.seek(0)
-            processor = EPUBSummaryInserter(api_key)
+            # Get tier limits
+            tier_limits = tier_options[selected_tier]
+            chars_per_minute = tier_limits["chars_per_min"]
+            requests_per_minute = tier_limits["rpm"]
+            chars_per_chapter = length_options[selected_length]
             
-            # Read the EPUB content into a temporary file
+            # Initialize processor with selected character limit
+            processor = EPUBSummaryInserter(api_key, chars_per_chapter)
+            
+            # Extract chapters first to get actual sizes
             with tempfile.NamedTemporaryFile(delete=False, suffix='.epub') as temp_input:
-                temp_input.write(uploaded_file.read())
+                temp_input.write(uploaded_file.getvalue())
                 temp_input_path = temp_input.name
             
-            # Extract chapters
             book = epub.read_epub(temp_input_path)
             chapters = processor.extract_chapters(temp_input_path)
-            
-            # Cleanup the temporary input file
             os.remove(temp_input_path)
-            
+
             if chapters:
-                st.subheader("Select Chapters to Summarize")
+                # Calculate average actual chapter size
+                avg_chapter_size = sum(min(chapter[3], chars_per_chapter) for chapter in chapters) / len(chapters)
                 
+                # Calculate batch parameters considering both character and request limits
+                chars_batch_size = chars_per_minute // max(int(avg_chapter_size), 1)
+                
+                # Minimum wait time of 20 seconds
+                min_wait = 20
+                rpm_batch_size = (requests_per_minute * min_wait) // 60
+                
+                # Take the more conservative of the two limits
+                batch_size = min(chars_batch_size, rpm_batch_size)
+                
+                # Recalculate wait time based on final batch size and actual chapter sizes
+                char_wait = (batch_size * avg_chapter_size * 60) // chars_per_minute
+                rpm_wait = (batch_size * 60) // requests_per_minute
+                batch_wait = max(min_wait, char_wait, rpm_wait)
+
+                # Display calculated processing parameters
+                st.info(f"""
+                    Processing Parameters:
+                    - Average chapter size: {int(avg_chapter_size):,} characters
+                    - Batch Size: {batch_size} chapters
+                    - Wait Time: {batch_wait} seconds between batches
+                    - Characters per chapter limit: {chars_per_chapter:,}
+                    - Estimated throughput: {int(batch_size * (60/batch_wait))} chapters/minute
+                """)
+
                 # Initialize selected_chapters in session state if not present
                 if 'selected_chapters' not in st.session_state:
                     st.session_state.selected_chapters = set()
@@ -317,7 +399,7 @@ def main():
                     st.session_state.selected_chapters = set(range(len(chapters)))
                 
                 # Display individual chapter checkboxes
-                for i, (_, title, _) in enumerate(chapters):
+                for i, (_, title, _, _) in enumerate(chapters):
                     # Use the value from session_state.selected_chapters to set initial state
                     is_checked = st.checkbox(
                         title,
@@ -337,7 +419,13 @@ def main():
                         st.warning("Please select at least one chapter")
                     else:
                         with st.spinner("Processing EPUB file..."):
-                            output_bytes = asyncio.run(processor.process_selected_chapters(selected_chapters, chapters, book))
+                            output_bytes = asyncio.run(processor.process_selected_chapters(
+                                selected_chapters, 
+                                chapters, 
+                                book,
+                                batch_size,
+                                batch_wait
+                            ))
                             
                             if output_bytes:
                                 # Auto-download trigger
