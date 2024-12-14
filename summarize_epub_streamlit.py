@@ -284,8 +284,8 @@ def main():
         
         ⚠️ **Important Usage Notes:**
         - Uses Claude 3.5 Haiku
-        - Processes chapters in batches of 15 with 20-second cooling periods
-        - Maximum 4,000 characters processed per chapter
+        - By default, processes chapters in batches of 15 with 20-second cooling periods
+        - Set the maximum characters processed per chapter
         - Maximum file size: 200MB
         - You are responsible for all API costs - check [Anthropic's pricing](https://www.anthropic.com/pricing)
     """)
