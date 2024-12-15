@@ -122,33 +122,76 @@ Food For Thought
                     return ""
 
     def insert_summary(self, html_content: str, summary: str) -> str:
-        """Insert summary at the start of chapter content"""
+        """Insert summary at the start of chapter content in an EPUB-friendly way"""
         soup = BeautifulSoup(html_content, 'html.parser')
         
-        # Create summary div with minimal styling
+        # Create summary div with semantic class names instead of inline styles
         summary_div = soup.new_tag('div')
         summary_div['class'] = 'chapter-digest'
-        summary_div['style'] = 'margin: 1em 0; padding: 1em; border: 1px solid #ccc;'
+        
+        # Create a style tag for the head if it doesn't exist
+        if not soup.find('style'):
+            style_tag = soup.new_tag('style')
+            style_tag.string = """
+                .chapter-digest {
+                    margin: 1em 0;
+                    padding: 1em;
+                    border: 1px solid currentColor;
+                }
+                .chapter-digest .section {
+                    margin-bottom: 1em;
+                }
+                .chapter-digest .heading {
+                    font-weight: bold;
+                    margin-bottom: 0.5em;
+                }
+                .chapter-digest ul {
+                    margin: 0;
+                    padding-left: 1.5em;
+                }
+                .chapter-digest li {
+                    margin-bottom: 0.3em;
+                }
+            """
+            # Insert style in head, or create head if needed
+            head = soup.find('head')
+            if not head:
+                head = soup.new_tag('head')
+                if soup.html:
+                    soup.html.insert(0, head)
+                else:
+                    html = soup.new_tag('html')
+                    html.append(head)
+                    soup.append(html)
+            head.append(style_tag)
         
         # Split the summary into sections and format them
         sections = summary.split('\n\n')
         for section in sections:
             section_div = soup.new_tag('div')
-            section_div['style'] = 'margin-bottom: 1em;'
+            section_div['class'] = 'section'
             
-            # Convert the text to paragraphs and lists
+            # Convert the text to semantic HTML
             lines = section.strip().split('\n')
+            current_list = None
+            
             for line in lines:
                 if line.strip():
                     if line.startswith('•'):
-                        p = soup.new_tag('li')
-                        p.string = line[1:].strip()
+                        # Create list if doesn't exist
+                        if not current_list:
+                            current_list = soup.new_tag('ul')
+                            section_div.append(current_list)
+                        li = soup.new_tag('li')
+                        li.string = line[1:].strip()
+                        current_list.append(li)
                     else:
+                        current_list = None  # Reset list
                         p = soup.new_tag('p')
                         if any(heading in line for heading in ['Perspectives', 'Implications', 'Food For Thought']):
-                            p['style'] = 'font-weight: bold; margin-bottom: 0.5em;'
+                            p['class'] = 'heading'
                         p.string = line
-                    section_div.append(p)
+                        section_div.append(p)
             
             summary_div.append(section_div)
         
@@ -157,7 +200,7 @@ Food For Thought
         body.insert(0, summary_div)
         
         return str(soup)
-
+    
     async def process_selected_chapters(self, selected_indices: List[int], chapters: List[Tuple[str, str, str, int]], book: epub.EpubBook, batch_size: int, batch_wait: int) -> bytes:
         """Process and insert summaries for selected chapters in parallel batches"""
         # Filter out chapters that are too short (less than 400 characters)
