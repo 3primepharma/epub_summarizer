@@ -2,7 +2,6 @@ import streamlit as st
 import ebooklib
 from ebooklib import epub
 from bs4 import BeautifulSoup
-import anthropic
 from typing import List, Tuple
 import os
 import time
@@ -10,13 +9,43 @@ import io
 import tempfile
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
+from pydantic import BaseModel, Field
+from pydantic_ai import Agent
+
+class ChapterDigest(BaseModel):
+    """Structured output model for chapter digests"""
+    summary: str = Field(description="A concise summary of the chapter (3-5 sentences)")
+    perspectives: List[str] = Field(description="3-5 bullet points highlighting main perspectives")
+    implications: List[str] = Field(description="3-5 bullet points outlining implications")
+    food_for_thought: List[str] = Field(description="3-5 thought-provoking questions or points")
 
 class EPUBSummaryInserter:
-    def __init__(self, api_key: str, chars_per_chapter: int):
+    def __init__(self, provider: str, model: str, api_key: str, chars_per_chapter: int):
         if not api_key:
-            raise ValueError("ANTHROPIC_API_KEY is required")
-        self.client = anthropic.Anthropic(api_key=api_key)
+            raise ValueError("API key is required")
+        
+        self.provider = provider
+        self.model = model
+        self.api_key = api_key
         self.chars_per_chapter = chars_per_chapter
+        self.agent = self._initialize_agent()
+    
+    def _initialize_agent(self):
+        """Initialize PydanticAI agent with the selected model"""
+        # Configure environment variables for the selected provider
+        if self.provider == "openai":
+            os.environ["OPENAI_API_KEY"] = self.api_key
+            model_name = f"openai:{self.model}"
+        elif self.provider == "anthropic":
+            os.environ["ANTHROPIC_API_KEY"] = self.api_key
+            # Add "-latest" suffix for Anthropic models
+            model_name = f"anthropic:{self.model}-latest"
+        elif self.provider == "gemini":
+            os.environ["GEMINI_API_KEY"] = self.api_key
+            model_name = f"google-gla:{self.model}"
+        
+        # Initialize PydanticAI agent with the selected model
+        return Agent(model=model_name, output_type=ChapterDigest)
 
     def extract_chapters(self, epub_file_path: str) -> List[Tuple[str, str, str, int]]:
         """
@@ -39,7 +68,7 @@ class EPUBSummaryInserter:
         return chapters
 
     async def get_chapter_summary(self, content: str) -> str:
-        """Get AI-generated summary for chapter content"""
+        """Get AI-generated summary for chapter content using PydanticAI"""
         # Create a container for status messages that will be overwritten
         status_container = st.empty()
         
@@ -50,68 +79,48 @@ class EPUBSummaryInserter:
 
 Here is the chapter text:
 <chapter_text>
-{text[:self.chars_per_chapter]}  # Using dynamic character limit
+{text[:self.chars_per_chapter]}
 </chapter_text>
 
-Please follow these steps to create the digest:
-
-1. Carefully read and analyze the provided chapter text.
-2. Write a concise summary of the chapter, capturing its main ideas and key points. This summary should be approximately 3-5 sentences long.
-3. Identify the main perspectives presented in the chapter. Create 3-5 bullet points highlighting these perspectives.
-4. Consider the implications of the chapter's content. Create 3-5 bullet points outlining these implications.
-5. Develop 3-5 thought-provoking questions or points to ponder related to the chapter's topic. These should stimulate further thinking and discussion.
-
-Present your digest in the following format, using the specified XML tags:
-
-<chapter_digest>
-[Insert your concise summary here]
-
-Perspectives
-• [Perspective 1]
-• [Perspective 2]
-• [Perspective 3]
-[Add more if necessary]
-
-Implications
-• [Implication 1]
-• [Implication 2]
-• [Implication 3]
-[Add more if necessary]
-
-Food For Thought
-• [Thought-provoking question or point 1]
-• [Thought-provoking question or point 2]
-• [Thought-provoking question or point 3]
-[Add more if necessary]
-</chapter_digest>"""
+Please analyze this text and create a chapter digest with:
+1. A concise summary of the chapter (3-5 sentences)
+2. 3-5 bullet points highlighting the main perspectives presented
+3. 3-5 bullet points outlining the implications of the content
+4. 3-5 thought-provoking questions or points to ponder related to the topic
+"""
 
         max_retries = 3
         for attempt in range(max_retries):
             try:
                 status_container.info(f'Attempt {attempt + 1}/{max_retries}: Generating summary...')
-                await asyncio.sleep(5)
                 
-                response = self.client.messages.create(
-                    model="claude-3-5-haiku-20241022",
-                    max_tokens=2000,
-                    temperature=0,
-                    messages=[{"role": "user", "content": [{"type": "text", "text": prompt}]}]
-                )
+                # Use PydanticAI to generate the summary
+                message_placeholder = st.empty()
+                
+                # Instead of streaming chunks, get the complete structured output
+                async with self.agent.run_stream(prompt) as result:
+                    # Get the final structured output
+                    digest = await result.get_output()
+                    
+                    # Format the digest into the expected format
+                    formatted_digest = f"""{digest.summary}
+
+Perspectives
+• {("• ").join([p + "\n" for p in digest.perspectives])}
+
+Implications
+• {("• ").join([i + "\n" for i in digest.implications])}
+
+Food For Thought
+• {("• ").join([f + "\n" for f in digest.food_for_thought])}"""
+                    
+                    # Display the formatted digest
+                    message_placeholder.markdown(formatted_digest)
                 
                 # Clear status message on success
                 status_container.empty()
                 
-                # Extract content between chapter_digest tags
-                response_text = response.content[0].text
-                start_tag = "<chapter_digest>"
-                end_tag = "</chapter_digest>"
-                start_idx = response_text.find(start_tag) + len(start_tag)
-                end_idx = response_text.find(end_tag)
-                
-                if start_idx == -1 or end_idx == -1:
-                    raise ValueError("Could not extract chapter digest from AI response")
-                
-                return response_text[start_idx:end_idx].strip()
+                return formatted_digest.strip()
                 
             except Exception as e:
                 if attempt < max_retries - 1:
@@ -316,7 +325,7 @@ def main():
     
     # Add key information from README
     st.markdown("""
-        Enhance your EPUB files with AI-powered chapter summaries using Anthropic's Claude API. 
+        Enhance your EPUB files with AI-powered chapter summaries using multiple LLM providers. 
         Each chapter summary includes:
         - Concise chapter overview
         - Key perspectives
@@ -326,11 +335,11 @@ def main():
         **Generated summaries are integrated seamlessly to the start of each chapter to get you primed and your juices flowing before diving into the material**
         
         ⚠️ **Important Usage Notes:**
-        - Uses Claude 3.5 Haiku
-        - By default, processes chapters in batches of 15 with 20-second cooling periods
+        - Supports OpenAI, Anthropic, and Google Gemini models
+        - By default, processes chapters in batches with cooling periods based on provider rate limits
         - Set the maximum characters processed per chapter
         - Maximum file size: 200MB
-        - You are responsible for all API costs - check [Anthropic's pricing](https://www.anthropic.com/pricing)
+        - You are responsible for all API costs - check your provider's pricing
     """)
     
     # File upload section
@@ -341,25 +350,65 @@ def main():
         help="Supported sources: Project Gutenberg, Instapaper, Calibre conversions, and more"
     )
     
-    # API Key input
+    # Provider and model selection
+    provider_options = {
+        "OpenAI": {
+            "models": ["gpt-4o-mini", "gpt-4o"],
+            "env_var": "OPENAI_API_KEY",
+            "label": "OpenAI API Key",
+            "rate_limits": {
+                "gpt-4o-mini": {"rpm": 500, "tpm": 300000},
+                "gpt-4o": {"rpm": 500, "tpm": 300000}
+            }
+        },
+        "Anthropic": {
+            "models": ["claude-3-5-haiku", "claude-3-5-sonnet"],
+            "env_var": "ANTHROPIC_API_KEY",
+            "label": "Anthropic API Key",
+            "rate_limits": {
+                "claude-3-5-haiku": {"rpm": 45, "tpm": 100000},
+                "claude-3-5-sonnet": {"rpm": 5, "tpm": 15000}
+            }
+        },
+        "Gemini": {
+            "models": ["gemini-2.0-flash", "gemini-2.0-pro"],
+            "env_var": "GEMINI_API_KEY",
+            "label": "Gemini API Key",
+            "rate_limits": {
+                "gemini-2.0-flash": {"rpm": 60, "tpm": 120000},
+                "gemini-2.0-pro": {"rpm": 60, "tpm": 120000}
+            }
+        }
+    }
+
+    selected_provider = st.selectbox(
+        "Select LLM Provider",
+        options=list(provider_options.keys()),
+        index=0,
+        help="Choose your preferred LLM provider"
+    )
+
+    # Get models for the selected provider
+    available_models = provider_options[selected_provider]["models"]
+    selected_model = st.selectbox(
+        f"Select {selected_provider} Model",
+        options=available_models,
+        index=0,
+        help=f"Choose which {selected_provider} model to use"
+    )
+
+    # Update API key input label based on selected provider
     api_key = st.text_input(
-        "Enter your Anthropic API Key",
+        provider_options[selected_provider]["label"],
         type="password",
         help="Your API key will not be stored"
     )
     
-    # Add API tier selection
-    tier_options = {
-        "Low (100k chars/min)": {"chars_per_min": 100000, "rpm": 45},
-        "Medium (200k chars/min)": {"chars_per_min": 200000, "rpm": 500},
-        "High (400k chars/min)": {"chars_per_min": 400000, "rpm": 1500}
-    }
-    selected_tier = st.selectbox(
-        "Select your Anthropic API tier",
-        options=list(tier_options.keys()),
-        index=0,
-        help="Choose based on your Anthropic API tier limits"
-    )
+    # Get rate limits for selected provider and model
+    provider_key = selected_provider.lower()
+    rate_limits = provider_options[selected_provider]["rate_limits"][selected_model]
+    requests_per_minute = rate_limits["rpm"]
+    tokens_per_minute = rate_limits["tpm"]
 
     # Add text length selection
     length_options = {
@@ -377,14 +426,16 @@ def main():
 
     if uploaded_file and api_key:
         try:
-            # Get tier limits
-            tier_limits = tier_options[selected_tier]
-            chars_per_minute = tier_limits["chars_per_min"]
-            requests_per_minute = tier_limits["rpm"]
+            # Get character limit for chapters
             chars_per_chapter = length_options[selected_length]
             
-            # Initialize processor with selected character limit
-            processor = EPUBSummaryInserter(api_key, chars_per_chapter)
+            # Initialize processor with selected provider, model, and character limit
+            processor = EPUBSummaryInserter(
+                provider=provider_key,
+                model=selected_model,
+                api_key=api_key,
+                chars_per_chapter=chars_per_chapter
+            )
             
             # Extract chapters first to get actual sizes
             with tempfile.NamedTemporaryFile(delete=False, suffix='.epub') as temp_input:
@@ -399,28 +450,32 @@ def main():
                 # Calculate average actual chapter size
                 avg_chapter_size = sum(min(chapter[3], chars_per_chapter) for chapter in chapters) / len(chapters)
                 
-                # Calculate batch parameters considering both character and request limits
-                chars_batch_size = chars_per_minute // max(int(avg_chapter_size), 1)
+                # Calculate batch parameters considering token limits and request limits
+                # Estimate tokens per chapter (roughly 4 chars per token)
+                tokens_per_chapter = avg_chapter_size / 4
+                tokens_batch_size = tokens_per_minute // max(int(tokens_per_chapter), 1)
                 
                 # Minimum wait time of 20 seconds
                 min_wait = 20
                 rpm_batch_size = (requests_per_minute * min_wait) // 60
                 
                 # Take the more conservative of the two limits
-                batch_size = min(chars_batch_size, rpm_batch_size)
+                batch_size = min(tokens_batch_size, rpm_batch_size)
                 
                 # Recalculate wait time based on final batch size and actual chapter sizes
-                char_wait = (batch_size * avg_chapter_size * 60) // chars_per_minute
+                token_wait = (batch_size * tokens_per_chapter * 60) // tokens_per_minute
                 rpm_wait = (batch_size * 60) // requests_per_minute
-                batch_wait = max(min_wait, char_wait, rpm_wait)
+                batch_wait = max(min_wait, token_wait, rpm_wait)
 
                 # Display calculated processing parameters
                 st.info(f"""
                     Processing Parameters:
-                    - Average chapter size: {int(avg_chapter_size):,} characters
+                    - Average chapter size: {int(avg_chapter_size):,} characters (~{int(tokens_per_chapter):,} tokens)
                     - Batch Size: {batch_size} chapters
                     - Wait Time: {batch_wait} seconds between batches
                     - Characters per chapter limit: {chars_per_chapter:,}
+                    - Token rate limit: {tokens_per_minute:,} tokens/minute
+                    - Request rate limit: {requests_per_minute} requests/minute
                     - Estimated throughput: {int(batch_size * (60/batch_wait))} chapters/minute
                 """)
 
@@ -492,16 +547,19 @@ def main():
     with st.expander("ℹ️ How to use"):
         st.markdown("""
             1. Upload your EPUB file using the file uploader above.
-            2. Enter your Anthropic API key.
-            3. Select the chapters you want to summarize.
-            4. Click 'Generate Summaries' to process your file.
-            5. Download the processed file when complete.
+            2. Select your preferred LLM provider and model.
+            3. Enter your API key for the selected provider.
+            4. Select the text length per chapter.
+            5. Select the chapters you want to summarize.
+            6. Click 'Generate Summaries' to process your file.
+            7. Download the processed file when complete.
             
             **Troubleshooting:**
             - Ensure your API key is valid and has sufficient credits
             - Verify your EPUB file is under 200MB and not DRM protected
             - If summaries fail, try processing fewer chapters at once
             - The app includes automatic retry logic (3 attempts)
+            - Different providers have different rate limits, which may affect processing speed
             
             **Security Note:** Your API key is never stored and is only used during the active session.
         """)
