@@ -17,6 +17,7 @@ class ChapterDigest(BaseModel):
     summary: str = Field(description="A concise summary of the chapter (3-5 sentences)")
     perspectives: List[str] = Field(description="3-5 bullet points highlighting main perspectives")
     implications: List[str] = Field(description="3-5 bullet points outlining implications")
+    dissenting_opinions: List[str] = Field(description="3-5 bullet points offering opposing viewpoints to the main perspective")
     food_for_thought: List[str] = Field(description="3-5 thought-provoking questions or points")
 
 class EPUBSummaryInserter:
@@ -86,7 +87,8 @@ Please analyze this text and create a chapter digest with:
 1. A concise summary of the chapter (3-5 sentences)
 2. 3-5 bullet points highlighting the main perspectives presented
 3. 3-5 bullet points outlining the implications of the content
-4. 3-5 thought-provoking questions or points to ponder related to the topic
+4. 3-5 bullet points offering dissenting opinions or opposing viewpoints to the main perspective
+5. 3-5 thought-provoking questions or points to ponder related to the topic
 """
 
         max_retries = 3
@@ -110,6 +112,9 @@ Perspectives
 
 Implications
 • {("• ").join([i + "\n" for i in digest.implications])}
+
+Dissenting Opinions
+• {("• ").join([d + "\n" for d in digest.dissenting_opinions])}
 
 Food For Thought
 • {("• ").join([f + "\n" for f in digest.food_for_thought])}"""
@@ -197,7 +202,7 @@ Food For Thought
                     else:
                         current_list = None  # Reset list
                         p = soup.new_tag('p')
-                        if any(heading in line for heading in ['Perspectives', 'Implications', 'Food For Thought']):
+                        if any(heading in line for heading in ['Perspectives', 'Implications', 'Dissenting Opinions', 'Food For Thought']):
                             p['class'] = 'heading'
                         p.string = line
                         section_div.append(p)
@@ -330,6 +335,7 @@ def main():
         - Concise chapter overview
         - Key perspectives
         - Important implications
+        - Dissenting opinions (opposing viewpoints)
         - Thought-provoking questions
 
         **Generated summaries are integrated seamlessly to the start of each chapter to get you primed and your juices flowing before diving into the material**
