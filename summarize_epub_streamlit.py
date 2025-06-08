@@ -377,12 +377,12 @@ def main():
             }
         },
         "Gemini": {
-            "models": ["gemini-2.0-flash", "gemini-2.0-pro"],
+            "models": ["gemini-2.5-flash", "gemini-2.5-pro"],
             "env_var": "GEMINI_API_KEY",
             "label": "Gemini API Key",
             "rate_limits": {
-                "gemini-2.0-flash": {"rpm": 60, "tpm": 120000},
-                "gemini-2.0-pro": {"rpm": 60, "tpm": 120000}
+                "gemini-2.5-flash-preview-05-20": {"rpm": 10, "tpm": 120000},
+                "gemini-2.5-pro-exp-03-25": {"rpm": 5, "tpm": 120000}
             }
         }
     }
