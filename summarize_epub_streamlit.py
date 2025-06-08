@@ -363,47 +363,59 @@ def main():
     # Provider and model selection
     provider_options = {
         "OpenAI": {
-            "models": ["gpt-4o-mini", "gpt-4o"],
             "env_var": "OPENAI_API_KEY",
             "label": "OpenAI API Key",
-            "rate_limits": {
+            "models": {
                 "gpt-4o-mini": {"rpm": 500, "tpm": 300000},
                 "gpt-4o": {"rpm": 500, "tpm": 300000}
             }
         },
         "Anthropic": {
-            "models": ["claude-3-5-haiku", "claude-3-5-sonnet"],
             "env_var": "ANTHROPIC_API_KEY",
             "label": "Anthropic API Key",
-            "rate_limits": {
+            "models": {
                 "claude-3-5-haiku": {"rpm": 45, "tpm": 100000},
                 "claude-3-5-sonnet": {"rpm": 5, "tpm": 15000}
             }
         },
         "Gemini": {
-            "models": ["gemini-2.5-flash-preview-05-20", "gemini-2.5-pro-exp-03-25"],
             "env_var": "GEMINI_API_KEY",
             "label": "Gemini API Key",
-            "rate_limits": {
+            "models": {
                 "gemini-2.5-flash-preview-05-20": {"rpm": 10, "tpm": 120000},
                 "gemini-2.5-pro-exp-03-25": {"rpm": 5, "tpm": 120000}
             }
         }
     }
 
+    def on_provider_change():
+        """Callback to reset model selection when provider changes."""
+        provider = st.session_state.provider_selector
+        first_model = list(provider_options[provider]["models"].keys())[0]
+        st.session_state.model_selector = first_model
+
+    # Initialize session state for selectors if they don't exist
+    if "provider_selector" not in st.session_state:
+        st.session_state.provider_selector = list(provider_options.keys())[0]
+    
+    current_provider_models = list(provider_options[st.session_state.provider_selector]["models"].keys())
+    if "model_selector" not in st.session_state or st.session_state.model_selector not in current_provider_models:
+        st.session_state.model_selector = current_provider_models[0]
+
     selected_provider = st.selectbox(
         "Select LLM Provider",
         options=list(provider_options.keys()),
-        index=0,
+        key="provider_selector",
+        on_change=on_provider_change,
         help="Choose your preferred LLM provider"
     )
 
     # Get models for the selected provider
-    available_models = provider_options[selected_provider]["models"]
+    available_models = list(provider_options[selected_provider]["models"].keys())
     selected_model = st.selectbox(
         f"Select {selected_provider} Model",
         options=available_models,
-        index=0,
+        key="model_selector",
         help=f"Choose which {selected_provider} model to use"
     )
 
@@ -416,7 +428,7 @@ def main():
     
     # Get rate limits for selected provider and model
     provider_key = selected_provider.lower()
-    rate_limits = provider_options[selected_provider]["rate_limits"][selected_model]
+    rate_limits = provider_options[selected_provider]["models"][selected_model]
     requests_per_minute = rate_limits["rpm"]
     tokens_per_minute = rate_limits["tpm"]
 
