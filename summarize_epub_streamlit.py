@@ -43,7 +43,7 @@ class EPUBSummaryInserter:
             model_name = f"anthropic:{self.model}-latest"
         elif self.provider == "gemini":
             os.environ["GEMINI_API_KEY"] = self.api_key
-            model_name = f"google-gla:{self.model}"
+            model_name = f"google:{self.model}"
         
         # Initialize PydanticAI agent with the selected model
         return Agent(model=model_name, output_type=ChapterDigest)
@@ -99,28 +99,32 @@ Please analyze this text and create a chapter digest with:
                 # Use PydanticAI to generate the summary
                 message_placeholder = st.empty()
                 
-                # Instead of streaming chunks, get the complete structured output
-                async with self.agent.run_stream(prompt) as result:
-                    # Get the final structured output
-                    digest = await result.get_output()
-                    
-                    # Format the digest into the expected format
-                    formatted_digest = f"""{digest.summary}
+                # The 'run' method is more direct for getting a single structured output
+                # compared to 'run_stream'.
+                digest = await self.agent.run(prompt)
+                
+                # Format the digest into a readable string
+                perspectives = "\n".join(f"• {p}" for p in digest.perspectives)
+                implications = "\n".join(f"• {i}" for i in digest.implications)
+                dissenting_opinions = "\n".join(f"• {d}" for d in digest.dissenting_opinions)
+                food_for_thought = "\n".join(f"• {f}" for f in digest.food_for_thought)
 
-Perspectives
-• {("• ").join([p + "\n" for p in digest.perspectives])}
+                formatted_digest = f"""{digest.summary}
 
-Implications
-• {("• ").join([i + "\n" for i in digest.implications])}
+**Perspectives**
+{perspectives}
 
-Dissenting Opinions
-• {("• ").join([d + "\n" for d in digest.dissenting_opinions])}
+**Implications**
+{implications}
 
-Food For Thought
-• {("• ").join([f + "\n" for f in digest.food_for_thought])}"""
-                    
-                    # Display the formatted digest
-                    message_placeholder.markdown(formatted_digest)
+**Dissenting Opinions**
+{dissenting_opinions}
+
+**Food For Thought**
+{food_for_thought}"""
+                
+                # Display the formatted digest
+                message_placeholder.markdown(formatted_digest)
                 
                 # Clear status message on success
                 status_container.empty()
@@ -204,7 +208,7 @@ Food For Thought
                         p = soup.new_tag('p')
                         if any(heading in line for heading in ['Perspectives', 'Implications', 'Dissenting Opinions', 'Food For Thought']):
                             p['class'] = 'heading'
-                        p.string = line
+                        p.string = line.replace('**', '')
                         section_div.append(p)
             
             summary_div.append(section_div)
@@ -377,7 +381,7 @@ def main():
             }
         },
         "Gemini": {
-            "models": ["gemini-2.5-flash", "gemini-2.5-pro"],
+            "models": ["gemini-2.5-flash-preview-05-20", "gemini-2.5-pro-exp-03-25"],
             "env_var": "GEMINI_API_KEY",
             "label": "Gemini API Key",
             "rate_limits": {
