@@ -39,14 +39,13 @@ class EPUBSummaryInserter:
             model_name = f"openai:{self.model}"
         elif self.provider == "anthropic":
             os.environ["ANTHROPIC_API_KEY"] = self.api_key
-            # Add "-latest" suffix for Anthropic models
-            model_name = f"anthropic:{self.model}-latest"
+            model_name = f"anthropic:{self.model}"
         elif self.provider == "gemini":
             os.environ["GEMINI_API_KEY"] = self.api_key
             model_name = f"google-gla:{self.model}"
         
         # Initialize PydanticAI agent with the selected model
-        return Agent(model=model_name, output_type=ChapterDigest)
+        return Agent(model_name, output_type=ChapterDigest)
 
     def extract_chapters(self, epub_file_path: str) -> List[Tuple[str, str, str, int]]:
         """
@@ -99,28 +98,33 @@ Please analyze this text and create a chapter digest with:
                 # Use PydanticAI to generate the summary
                 message_placeholder = st.empty()
                 
-                # Instead of streaming chunks, get the complete structured output
-                async with self.agent.run_stream(prompt) as result:
-                    # Get the final structured output
-                    digest = await result.get_output()
-                    
-                    # Format the digest into the expected format
-                    formatted_digest = f"""{digest.summary}
+                # The 'run' method is more direct for getting a single structured output
+                # compared to 'run_stream'.
+                result = await self.agent.run(prompt)
+                digest = result.output
+                
+                # Format the digest into a readable string
+                perspectives = "\n".join(f"• {p}" for p in digest.perspectives)
+                implications = "\n".join(f"• {i}" for i in digest.implications)
+                dissenting_opinions = "\n".join(f"• {d}" for d in digest.dissenting_opinions)
+                food_for_thought = "\n".join(f"• {f}" for f in digest.food_for_thought)
 
-Perspectives
-• {("• ").join([p + "\n" for p in digest.perspectives])}
+                formatted_digest = f"""{digest.summary}
 
-Implications
-• {("• ").join([i + "\n" for i in digest.implications])}
+**Perspectives**
+{perspectives}
 
-Dissenting Opinions
-• {("• ").join([d + "\n" for d in digest.dissenting_opinions])}
+**Implications**
+{implications}
 
-Food For Thought
-• {("• ").join([f + "\n" for f in digest.food_for_thought])}"""
-                    
-                    # Display the formatted digest
-                    message_placeholder.markdown(formatted_digest)
+**Dissenting Opinions**
+{dissenting_opinions}
+
+**Food For Thought**
+{food_for_thought}"""
+                
+                # Display the formatted digest
+                message_placeholder.markdown(formatted_digest)
                 
                 # Clear status message on success
                 status_container.empty()
@@ -204,7 +208,7 @@ Food For Thought
                         p = soup.new_tag('p')
                         if any(heading in line for heading in ['Perspectives', 'Implications', 'Dissenting Opinions', 'Food For Thought']):
                             p['class'] = 'heading'
-                        p.string = line
+                        p.string = line.replace('**', '')
                         section_div.append(p)
             
             summary_div.append(section_div)
@@ -359,47 +363,59 @@ def main():
     # Provider and model selection
     provider_options = {
         "OpenAI": {
-            "models": ["gpt-4o-mini", "gpt-4o"],
             "env_var": "OPENAI_API_KEY",
             "label": "OpenAI API Key",
-            "rate_limits": {
+            "models": {
                 "gpt-4o-mini": {"rpm": 500, "tpm": 300000},
                 "gpt-4o": {"rpm": 500, "tpm": 300000}
             }
         },
         "Anthropic": {
-            "models": ["claude-3-5-haiku", "claude-3-5-sonnet"],
             "env_var": "ANTHROPIC_API_KEY",
             "label": "Anthropic API Key",
-            "rate_limits": {
-                "claude-3-5-haiku": {"rpm": 45, "tpm": 100000},
-                "claude-3-5-sonnet": {"rpm": 5, "tpm": 15000}
+            "models": {
+                "claude-3-5-sonnet-latest": {"rpm": 5, "tpm": 15000},
+                "claude-3-haiku-20240307": {"rpm": 45, "tpm": 100000}
             }
         },
         "Gemini": {
-            "models": ["gemini-2.0-flash", "gemini-2.0-pro"],
             "env_var": "GEMINI_API_KEY",
             "label": "Gemini API Key",
-            "rate_limits": {
-                "gemini-2.0-flash": {"rpm": 60, "tpm": 120000},
-                "gemini-2.0-pro": {"rpm": 60, "tpm": 120000}
+            "models": {
+                "gemini-1.5-flash": {"rpm": 10, "tpm": 120000},
+                "gemini-1.5-pro": {"rpm": 5, "tpm": 120000}
             }
         }
     }
 
+    def on_provider_change():
+        """Callback to reset model selection when provider changes."""
+        provider = st.session_state.provider_selector
+        first_model = list(provider_options[provider]["models"].keys())[0]
+        st.session_state.model_selector = first_model
+
+    # Initialize session state for selectors if they don't exist
+    if "provider_selector" not in st.session_state:
+        st.session_state.provider_selector = list(provider_options.keys())[0]
+    
+    current_provider_models = list(provider_options[st.session_state.provider_selector]["models"].keys())
+    if "model_selector" not in st.session_state or st.session_state.model_selector not in current_provider_models:
+        st.session_state.model_selector = current_provider_models[0]
+
     selected_provider = st.selectbox(
         "Select LLM Provider",
         options=list(provider_options.keys()),
-        index=0,
+        key="provider_selector",
+        on_change=on_provider_change,
         help="Choose your preferred LLM provider"
     )
 
     # Get models for the selected provider
-    available_models = provider_options[selected_provider]["models"]
+    available_models = list(provider_options[selected_provider]["models"].keys())
     selected_model = st.selectbox(
         f"Select {selected_provider} Model",
         options=available_models,
-        index=0,
+        key="model_selector",
         help=f"Choose which {selected_provider} model to use"
     )
 
@@ -412,7 +428,7 @@ def main():
     
     # Get rate limits for selected provider and model
     provider_key = selected_provider.lower()
-    rate_limits = provider_options[selected_provider]["rate_limits"][selected_model]
+    rate_limits = provider_options[selected_provider]["models"][selected_model]
     requests_per_minute = rate_limits["rpm"]
     tokens_per_minute = rate_limits["tpm"]
 
