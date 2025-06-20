@@ -374,16 +374,16 @@ def main():
             "env_var": "ANTHROPIC_API_KEY",
             "label": "Anthropic API Key",
             "models": {
-                "anthropic:claude-3-5-haiku-20241022": {"rpm": 5, "tpm": 1500},
-                "anthropic:claude-3-5-haiku-20250219": {"rpm": 45, "tpm": 10000}
+                "anthropic:anthropic:claude-3-7-sonnet-latest": {"rpm": 5, "tpm": 9000},
+                "anthropic:claude-3-5-haiku-20250219": {"rpm": 45, "tpm": 100000}
             }
         },
         "Gemini": {
             "env_var": "GEMINI_API_KEY",
             "label": "Gemini API Key",
             "models": {
-                "gemini-2.5-flash": {"rpm": 10, "tpm": 10000},
-                "gemini-2.5-pro": {"rpm": 5, "tpm": 120}
+                "gemini-2.5-flash": {"rpm": 10, "tpm": 100000},
+                "gemini-2.5-pro": {"rpm": 5, "tpm": 9000}
             }
         }
     }
