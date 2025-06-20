@@ -374,8 +374,8 @@ def main():
             "env_var": "ANTHROPIC_API_KEY",
             "label": "Anthropic API Key",
             "models": {
-                "anthropic:anthropic:claude-3-7-sonnet-latest": {"rpm": 5, "tpm": 9000},
-                "anthropic:claude-3-5-haiku-20250219": {"rpm": 45, "tpm": 100000}
+                "claude-3-7-sonnet-latest": {"rpm": 5, "tpm": 9000},
+                "claude-3-5-haiku-20250219": {"rpm": 45, "tpm": 100000}
             }
         },
         "Gemini": {
