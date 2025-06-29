@@ -67,7 +67,7 @@ class EPUBSummaryInserter:
         
         return chapters
 
-    async def get_chapter_summary(self, content: str) -> str:
+    async def get_chapter_summary(self, content: str, chapter_title: str = "Chapter") -> str:
         """Get AI-generated summary for chapter content using PydanticAI"""
         # Create a container for status messages that will be overwritten
         status_container = st.empty()
@@ -123,8 +123,8 @@ Please analyze this text and create a chapter digest with:
 **Food For Thought**
 {food_for_thought}"""
                 
-                # Display the formatted digest
-                message_placeholder.markdown(formatted_digest)
+                # Clear the message placeholder instead of showing success message
+                message_placeholder.empty()
                 
                 # Clear status message on success
                 status_container.empty()
@@ -262,18 +262,23 @@ Please analyze this text and create a chapter digest with:
         BATCH_SIZE = adjusted_batch_size
         BATCH_WAIT = adjusted_wait  # seconds
         processed_chapters = 0
+        successful_chapters = 0
+        failed_chapters = 0
         
-        async def process_chapter(i: int) -> Tuple[str, str, bool]:
+        # Store processed summaries for review section
+        processed_summaries = []
+        
+        async def process_chapter(i: int) -> Tuple[str, str, str, bool]:
             chapter_id, title, content, _ = chapters[i]
             try:
-                summary = await self.get_chapter_summary(content)
+                summary = await self.get_chapter_summary(content, title)
                 if summary:
                     modified_content = self.insert_summary(content, summary)
-                    return (chapter_id, modified_content, True)
-                return (chapter_id, "", False)
+                    return (chapter_id, modified_content, summary, True)
+                return (chapter_id, "", "", False)
             except Exception as e:
                 st.error(f"Error processing {title}: {str(e)}")
-                return (chapter_id, "", False)
+                return (chapter_id, "", "", False)
 
         # Process chapters in batches
         for batch_start in range(0, len(valid_indices), BATCH_SIZE):
@@ -284,14 +289,23 @@ Please analyze this text and create a chapter digest with:
             tasks = [process_chapter(i) for i in batch_indices]
             batch_results = await asyncio.gather(*tasks)
             
-            # Update book with results
-            for chapter_id, content, success in batch_results:
+            # Update book with results and collect summaries
+            for i, (chapter_id, content, summary, success) in enumerate(batch_results):
                 if success and content:
+                    # Update the book content
                     for item in book.get_items():
                         if item.id == chapter_id:
                             item.set_content(content.encode())
                             processed_chapters += 1
+                            successful_chapters += 1
                             progress_bar.progress(processed_chapters / len(valid_indices))
+                    
+                    # Store summary for review section
+                    chapter_index = batch_indices[i]
+                    chapter_title = chapters[chapter_index][1]
+                    processed_summaries.append((chapter_title, summary))
+                else:
+                    failed_chapters += 1
             
             # Wait between batches if there are more chapters to process
             if batch_start + BATCH_SIZE < len(valid_indices):
@@ -299,8 +313,9 @@ Please analyze this text and create a chapter digest with:
                 await asyncio.sleep(BATCH_WAIT)
 
         current_batch.empty()
+        status_container.empty()
         
-        # Save modified book
+        # Save modified book first
         with tempfile.NamedTemporaryFile(delete=False, suffix='.epub') as temp_output:
             epub.write_epub(temp_output.name, book)
             temp_output_path = temp_output.name
@@ -309,7 +324,8 @@ Please analyze this text and create a chapter digest with:
             output_bytes = f.read()
         
         os.remove(temp_output_path)
-        return output_bytes
+        
+        return output_bytes, processed_summaries, successful_chapters, failed_chapters
 
 def main():
     st.set_page_config(page_title="EPUB Summary Generator", layout="wide")
@@ -382,7 +398,7 @@ def main():
             "env_var": "GEMINI_API_KEY",
             "label": "Gemini API Key",
             "models": {
-                "gemini-2.5-flash": {"rpm": 10, "tpm": 100000},
+                "gemini-2.5-flash": {"rpm": 50, "tpm": 100000},
                 "gemini-2.5-pro": {"rpm": 5, "tpm": 9000}
             }
         }
@@ -541,7 +557,7 @@ def main():
                         st.warning("Please select at least one chapter")
                     else:
                         with st.spinner("Processing EPUB file..."):
-                            output_bytes = asyncio.run(processor.process_selected_chapters(
+                            result = asyncio.run(processor.process_selected_chapters(
                                 selected_chapters, 
                                 chapters, 
                                 book,
@@ -549,16 +565,40 @@ def main():
                                 batch_wait
                             ))
                             
-                            if output_bytes:
-                                # Auto-download trigger
+                            if result:
+                                output_bytes, processed_summaries, successful_chapters, failed_chapters = result
+                                
+                                # Create results summary message
+                                total_attempted = len(selected_chapters)
+                                if failed_chapters > 0:
+                                    results_message = f"✅ Processing complete! {successful_chapters} of {total_attempted} chapters processed successfully ({failed_chapters} failed)"
+                                    st.warning(results_message)
+                                else:
+                                    results_message = f"✅ Processing complete! All {successful_chapters} chapters processed successfully"
+                                    st.success(results_message)
+                                
+                                # Prominent download button positioned right after results summary
                                 output_filename = f"{os.path.splitext(uploaded_file.name)[0]}_with_summaries.epub"
                                 st.download_button(
                                     label="📥 Download Processed EPUB",
                                     data=output_bytes,
                                     file_name=output_filename,
-                                    mime="application/epub+zip"
+                                    mime="application/epub+zip",
+                                    type="primary"
                                 )
-                                st.success("✅ Processing complete! Your file has been prepared for download.")
+                                
+                                # Add some spacing
+                                st.markdown("---")
+                                
+                                # Add review section for processed summaries in a collapsible container
+                                if processed_summaries:
+                                    with st.expander("📋 Review Generated Summaries (Optional)", expanded=False):
+                                        st.markdown("**Generated summaries for each chapter:**")
+                                        
+                                        for chapter_title, summary in processed_summaries:
+                                            st.markdown(f"**✅ {chapter_title}**")
+                                            st.markdown(summary)
+                                            st.markdown("---")
             else:
                 st.warning("No chapters found in the uploaded EPUB file.")
         
