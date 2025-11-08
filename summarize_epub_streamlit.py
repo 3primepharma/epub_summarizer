@@ -376,30 +376,74 @@ def main():
         help="Supported sources: Project Gutenberg, Instapaper, Calibre conversions, and more"
     )
     
-    # Provider and model selection
+    # Provider and model selection with tier-based rate limits
     provider_options = {
         "OpenAI": {
             "env_var": "OPENAI_API_KEY",
             "label": "OpenAI API Key",
             "models": {
-                "gpt-4o-mini": {"rpm": 500, "tpm": 300000},
-                "gpt-4o": {"rpm": 500, "tpm": 300000}
+                "gpt-4o-mini": {
+                    "tiers": {
+                        "Tier 1 (Free)": {"rpm": 500, "tpm": 200000},
+                        "Tier 2": {"rpm": 5000, "tpm": 2000000},
+                        "Tier 3": {"rpm": 10000, "tpm": 10000000},
+                        "Tier 4": {"rpm": 30000, "tpm": 30000000},
+                        "Tier 5": {"rpm": 80000, "tpm": 80000000},
+                    }
+                },
+                "gpt-4o": {
+                    "tiers": {
+                        "Tier 1 (Free)": {"rpm": 500, "tpm": 30000},
+                        "Tier 2": {"rpm": 5000, "tpm": 450000},
+                        "Tier 3": {"rpm": 10000, "tpm": 1000000},
+                        "Tier 4": {"rpm": 30000, "tpm": 5000000},
+                        "Tier 5": {"rpm": 80000, "tpm": 10000000},
+                    }
+                }
             }
         },
         "Anthropic": {
             "env_var": "ANTHROPIC_API_KEY",
             "label": "Anthropic API Key",
             "models": {
-                "claude-3-7-sonnet-20250219": {"rpm": 5, "tpm": 9000},
-                "claude-3-5-haiku-20241022": {"rpm": 45, "tpm": 100000}
+                "claude-3-7-sonnet-20250219": {
+                    "tiers": {
+                        "Tier 1": {"rpm": 50, "tpm": 50000},
+                        "Tier 2": {"rpm": 1000, "tpm": 100000},
+                        "Tier 3": {"rpm": 2000, "tpm": 200000},
+                        "Tier 4": {"rpm": 4000, "tpm": 400000},
+                    }
+                },
+                "claude-3-5-haiku-20241022": {
+                    "tiers": {
+                        "Tier 1": {"rpm": 50, "tpm": 50000},
+                        "Tier 2": {"rpm": 1000, "tpm": 100000},
+                        "Tier 3": {"rpm": 2000, "tpm": 200000},
+                        "Tier 4": {"rpm": 4000, "tpm": 400000},
+                    }
+                }
             }
         },
         "Gemini": {
             "env_var": "GEMINI_API_KEY",
             "label": "Gemini API Key",
             "models": {
-                "gemini-2.5-flash": {"rpm": 50, "tpm": 100000},
-                "gemini-2.5-pro": {"rpm": 5, "tpm": 9000}
+                "gemini-2.5-flash": {
+                    "tiers": {
+                        "Free Tier": {"rpm": 10, "tpm": 250000},
+                        "Tier 1 (Paid)": {"rpm": 300, "tpm": 1000000},
+                        "Tier 2 ($250+)": {"rpm": 1000, "tpm": 4000000},
+                        "Tier 3 (Enterprise)": {"rpm": 2000, "tpm": 10000000},
+                    }
+                },
+                "gemini-2.5-pro": {
+                    "tiers": {
+                        "Free Tier": {"rpm": 5, "tpm": 32000},
+                        "Tier 1 (Paid)": {"rpm": 300, "tpm": 1000000},
+                        "Tier 2 ($250+)": {"rpm": 1000, "tpm": 4000000},
+                        "Tier 3 (Enterprise)": {"rpm": 2000, "tpm": 10000000},
+                    }
+                }
             }
         }
     }
@@ -410,13 +454,29 @@ def main():
         first_model = list(provider_options[provider]["models"].keys())[0]
         st.session_state.model_selector = first_model
 
+        # Reset tier selection when provider changes
+        first_tier = list(provider_options[provider]["models"][first_model]["tiers"].keys())[0]
+        st.session_state.tier_selector = first_tier
+
+    def on_model_change():
+        """Callback to reset tier selection when model changes."""
+        provider = st.session_state.provider_selector
+        model = st.session_state.model_selector
+        first_tier = list(provider_options[provider]["models"][model]["tiers"].keys())[0]
+        st.session_state.tier_selector = first_tier
+
     # Initialize session state for selectors if they don't exist
     if "provider_selector" not in st.session_state:
         st.session_state.provider_selector = list(provider_options.keys())[0]
-    
+
     current_provider_models = list(provider_options[st.session_state.provider_selector]["models"].keys())
     if "model_selector" not in st.session_state or st.session_state.model_selector not in current_provider_models:
         st.session_state.model_selector = current_provider_models[0]
+
+    # Initialize tier selector
+    if "tier_selector" not in st.session_state:
+        first_tier = list(provider_options[st.session_state.provider_selector]["models"][st.session_state.model_selector]["tiers"].keys())[0]
+        st.session_state.tier_selector = first_tier
 
     selected_provider = st.selectbox(
         "Select LLM Provider",
@@ -432,8 +492,46 @@ def main():
         f"Select {selected_provider} Model",
         options=available_models,
         key="model_selector",
+        on_change=on_model_change,
         help=f"Choose which {selected_provider} model to use"
     )
+
+    # Get tiers for the selected model
+    available_tiers = list(provider_options[selected_provider]["models"][selected_model]["tiers"].keys())
+    available_tiers.append("Custom")  # Add custom option
+
+    selected_tier = st.selectbox(
+        "Select Your Rate Limit Tier",
+        options=available_tiers,
+        key="tier_selector",
+        help="Select your API tier based on your account limits. Choose 'Custom' if you know your exact limits."
+    )
+
+    # Custom tier inputs
+    if selected_tier == "Custom":
+        st.markdown("**Custom Rate Limits**")
+        col1, col2 = st.columns(2)
+        with col1:
+            custom_rpm = st.number_input(
+                "Requests Per Minute (RPM)",
+                min_value=1,
+                value=100,
+                help="Your account's requests per minute limit"
+            )
+        with col2:
+            custom_tpm = st.number_input(
+                "Tokens Per Minute (TPM)",
+                min_value=1000,
+                value=100000,
+                help="Your account's tokens per minute limit"
+            )
+        requests_per_minute = custom_rpm
+        tokens_per_minute = custom_tpm
+    else:
+        # Get rate limits for selected tier
+        rate_limits = provider_options[selected_provider]["models"][selected_model]["tiers"][selected_tier]
+        requests_per_minute = rate_limits["rpm"]
+        tokens_per_minute = rate_limits["tpm"]
 
     # Update API key input label based on selected provider
     api_key = st.text_input(
@@ -441,12 +539,27 @@ def main():
         type="password",
         help="Your API key will not be stored"
     )
-    
-    # Get rate limits for selected provider and model
+
+    # Get provider key for initialization
     provider_key = selected_provider.lower()
-    rate_limits = provider_options[selected_provider]["models"][selected_model]
-    requests_per_minute = rate_limits["rpm"]
-    tokens_per_minute = rate_limits["tpm"]
+
+    # Add buffer/safety factor selection
+    buffer_options = {
+        "Conservative (50% of limits)": 0.5,
+        "Balanced (70% of limits)": 0.7,
+        "Aggressive (90% of limits)": 0.9,
+    }
+    selected_buffer = st.selectbox(
+        "Rate Limit Buffer",
+        options=list(buffer_options.keys()),
+        index=1,  # Default to Balanced
+        help="How much of your rate limit to use. Conservative is safer for shared accounts or variable network conditions."
+    )
+    buffer_factor = buffer_options[selected_buffer]
+
+    # Apply buffer to rate limits
+    effective_rpm = int(requests_per_minute * buffer_factor)
+    effective_tpm = int(tokens_per_minute * buffer_factor)
 
     # Add text length selection
     length_options = {
@@ -487,34 +600,42 @@ def main():
             if chapters:
                 # Calculate average actual chapter size
                 avg_chapter_size = sum(min(chapter[3], chars_per_chapter) for chapter in chapters) / len(chapters)
-                
+
                 # Calculate batch parameters considering token limits and request limits
                 # Estimate tokens per chapter (roughly 4 chars per token)
                 tokens_per_chapter = avg_chapter_size / 4
-                tokens_batch_size = tokens_per_minute // max(int(tokens_per_chapter), 1)
-                
-                # Minimum wait time of 20 seconds
-                min_wait = 20
-                rpm_batch_size = (requests_per_minute * min_wait) // 60
-                
+
+                # Calculate batch size based on token limits
+                tokens_batch_size = effective_tpm // max(int(tokens_per_chapter), 1)
+
+                # Calculate batch size based on request limits
+                # Use a minimum wait time to avoid too-frequent batches
+                min_wait = 10  # Reduced from 20 for higher tier users
+                rpm_batch_size = (effective_rpm * min_wait) // 60
+
                 # Take the more conservative of the two limits
-                batch_size = min(tokens_batch_size, rpm_batch_size)
-                
-                # Recalculate wait time based on final batch size and actual chapter sizes
-                token_wait = (batch_size * tokens_per_chapter * 60) // tokens_per_minute
-                rpm_wait = (batch_size * 60) // requests_per_minute
-                batch_wait = max(min_wait, token_wait, rpm_wait)
+                batch_size = max(1, min(tokens_batch_size, rpm_batch_size))
+
+                # Recalculate optimal wait time based on final batch size
+                # Calculate wait needed to stay within token limits
+                token_wait = (batch_size * tokens_per_chapter * 60) / effective_tpm if effective_tpm > 0 else min_wait
+                # Calculate wait needed to stay within request limits
+                rpm_wait = (batch_size * 60) / effective_rpm if effective_rpm > 0 else min_wait
+                # Use the larger of the two waits, but at least min_wait
+                batch_wait = max(min_wait, int(token_wait), int(rpm_wait))
 
                 # Display calculated processing parameters
                 st.info(f"""
-                    Processing Parameters:
+                    **Processing Parameters:**
+                    - Selected Tier: {selected_tier}
+                    - Buffer Factor: {int(buffer_factor * 100)}% ({selected_buffer.split(' (')[0]})
+                    - Effective Rate Limits: {effective_rpm} RPM, {effective_tpm:,} TPM
                     - Average chapter size: {int(avg_chapter_size):,} characters (~{int(tokens_per_chapter):,} tokens)
                     - Batch Size: {batch_size} chapters
                     - Wait Time: {batch_wait} seconds between batches
                     - Characters per chapter limit: {chars_per_chapter:,}
-                    - Token rate limit: {tokens_per_minute:,} tokens/minute
-                    - Request rate limit: {requests_per_minute} requests/minute
                     - Estimated throughput: {int(batch_size * (60/batch_wait))} chapters/minute
+                    - Total chapters: {len(chapters)}
                 """)
 
                 # Initialize selected_chapters in session state if not present
