@@ -13,12 +13,12 @@ from pydantic import BaseModel, Field
 from pydantic_ai import Agent
 
 class ChapterDigest(BaseModel):
-    """Structured output model for chapter digests"""
-    summary: str = Field(description="A concise summary of the chapter (3-5 sentences)")
-    perspectives: List[str] = Field(description="3-5 bullet points highlighting main perspectives")
-    implications: List[str] = Field(description="3-5 bullet points outlining implications")
-    dissenting_opinions: List[str] = Field(description="3-5 bullet points offering opposing viewpoints to the main perspective")
-    food_for_thought: List[str] = Field(description="3-5 thought-provoking questions or points")
+    """Structured output model for chapter pre-reads"""
+    content_type: str = Field(description="Detected type: fiction, non-fiction, news, memoir, or technical")
+    at_a_glance: str = Field(description="2-3 sentence orientation to the chapter")
+    key_concepts: List[str] = Field(description="3-4 key terms, ideas, or themes to prime the reader")
+    questions_to_hold: List[str] = Field(description="2-3 questions to consider while reading")
+    points_of_tension: List[str] = Field(description="2-3 areas of complexity, debate, or narrative tension")
 
 class EPUBSummaryInserter:
     def __init__(self, provider: str, model: str, api_key: str, chars_per_chapter: int):
@@ -75,19 +75,29 @@ class EPUBSummaryInserter:
         # Strip HTML tags for cleaner text
         text = BeautifulSoup(content, 'html.parser').get_text()
         
-        prompt = f"""You are tasked with creating a comprehensive digest of a chapter from an epub, which could be from a book, newspaper, saved articles, or documentation. Your goal is to provide a quick overview of what to expect before reading, along with additional insights to stimulate thinking on the chapter's topic.
+        prompt = f"""Analyze this chapter and create a pre-reading primer to help the reader engage more deeply with the material.
 
-Here is the chapter text:
-<chapter_text>
+<chapter>
 {text[:self.chars_per_chapter]}
-</chapter_text>
+</chapter>
 
-Please analyze this text and create a chapter digest with:
-1. A concise summary of the chapter (3-5 sentences)
-2. 3-5 bullet points highlighting the main perspectives presented
-3. 3-5 bullet points outlining the implications of the content
-4. 3-5 bullet points offering dissenting opinions or opposing viewpoints to the main perspective
-5. 3-5 thought-provoking questions or points to ponder related to the topic
+First, identify the content type (fiction/novel, non-fiction/educational, news/current events, personal essay/memoir, technical/documentation).
+
+Then create a pre-read with these sections:
+
+**At a Glance** (2-3 sentences)
+A brief orientation: what is this chapter about and what kind of reading experience to expect.
+
+**Key Concepts** (3-4 items)
+Important terms, ideas, or themes the reader should be aware of. For fiction, this might be character dynamics or symbolic elements. For non-fiction, key vocabulary or frameworks.
+
+**Questions to Hold** (2-3 questions)
+Thought-provoking questions for the reader to keep in mind while reading. These should enhance engagement, not spoil content.
+
+**Points of Tension** (2-3 items)
+For non-fiction: competing perspectives, nuances, or areas of debate within the topic.
+For fiction: conflicts, thematic tensions, or narrative questions being developed.
+For news: context that adds depth or complexity to the reporting.
 """
 
         max_retries = 3
@@ -104,24 +114,20 @@ Please analyze this text and create a chapter digest with:
                 digest = result.output
                 
                 # Format the digest into a readable string
-                perspectives = "\n".join(f"• {p}" for p in digest.perspectives)
-                implications = "\n".join(f"• {i}" for i in digest.implications)
-                dissenting_opinions = "\n".join(f"• {d}" for d in digest.dissenting_opinions)
-                food_for_thought = "\n".join(f"• {f}" for f in digest.food_for_thought)
+                key_concepts = "\n".join(f"• {c}" for c in digest.key_concepts)
+                questions = "\n".join(f"• {q}" for q in digest.questions_to_hold)
+                tensions = "\n".join(f"• {t}" for t in digest.points_of_tension)
 
-                formatted_digest = f"""{digest.summary}
+                formatted_digest = f"""{digest.at_a_glance}
 
-**Perspectives**
-{perspectives}
+**Key Concepts**
+{key_concepts}
 
-**Implications**
-{implications}
+**Questions to Hold**
+{questions}
 
-**Dissenting Opinions**
-{dissenting_opinions}
-
-**Food For Thought**
-{food_for_thought}"""
+**Points of Tension**
+{tensions}"""
                 
                 # Clear the message placeholder instead of showing success message
                 message_placeholder.empty()
@@ -206,7 +212,7 @@ Please analyze this text and create a chapter digest with:
                     else:
                         current_list = None  # Reset list
                         p = soup.new_tag('p')
-                        if any(heading in line for heading in ['Perspectives', 'Implications', 'Dissenting Opinions', 'Food For Thought']):
+                        if any(heading in line for heading in ['Key Concepts', 'Questions to Hold', 'Points of Tension']):
                             p['class'] = 'heading'
                         p.string = line.replace('**', '')
                         section_div.append(p)
@@ -350,20 +356,19 @@ def main():
     
     # Add key information from README
     st.markdown("""
-        Enhance your EPUB files with AI-powered chapter summaries using multiple LLM providers. 
-        Each chapter summary includes:
-        - Concise chapter overview
-        - Key perspectives
-        - Important implications
-        - Dissenting opinions (opposing viewpoints)
-        - Thought-provoking questions
+        Enhance your EPUB files with AI-powered pre-reading primers using multiple LLM providers.
+        Each chapter pre-read includes:
+        - At a Glance: Brief orientation to the chapter
+        - Key Concepts: Terms, ideas, and themes to prime your reading
+        - Questions to Hold: Thought-provoking questions to consider while reading
+        - Points of Tension: Areas of complexity, debate, or narrative tension
 
-        **Generated summaries are integrated seamlessly to the start of each chapter to get you primed and your juices flowing before diving into the material**
-        
+        **Generated pre-reads are integrated seamlessly to the start of each chapter to activate your thinking before diving into the material**
+
         ⚠️ **Important Usage Notes:**
         - Supports OpenAI, Anthropic, and Google Gemini models
+        - Content-adaptive: adjusts output based on fiction, non-fiction, news, etc.
         - By default, processes chapters in batches with cooling periods based on provider rate limits
-        - Set the maximum characters processed per chapter
         - Maximum file size: 200MB
         - You are responsible for all API costs - check your provider's pricing
     """)
