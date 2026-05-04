@@ -381,28 +381,30 @@ def main():
         help="Supported sources: Project Gutenberg, Instapaper, Calibre conversions, and more"
     )
     
-    # Provider and model selection with tier-based rate limits
+    # Provider and model selection with tier-based rate limits.
+    # TPM values reflect input-token-per-minute (ITPM) limits where providers
+    # split input/output, since chapter ingestion is input-bound.
     provider_options = {
         "OpenAI": {
             "env_var": "OPENAI_API_KEY",
             "label": "OpenAI API Key",
             "models": {
-                "gpt-4o-mini": {
+                "gpt-5.4-nano": {
                     "tiers": {
-                        "Tier 1 (Free)": {"rpm": 500, "tpm": 200000},
+                        "Tier 1": {"rpm": 500, "tpm": 200000},
                         "Tier 2": {"rpm": 5000, "tpm": 2000000},
-                        "Tier 3": {"rpm": 10000, "tpm": 10000000},
-                        "Tier 4": {"rpm": 30000, "tpm": 30000000},
-                        "Tier 5": {"rpm": 80000, "tpm": 80000000},
+                        "Tier 3": {"rpm": 5000, "tpm": 4000000},
+                        "Tier 4": {"rpm": 10000, "tpm": 10000000},
+                        "Tier 5": {"rpm": 30000, "tpm": 180000000},
                     }
                 },
-                "gpt-4o": {
+                "gpt-5.4-mini": {
                     "tiers": {
-                        "Tier 1 (Free)": {"rpm": 500, "tpm": 30000},
-                        "Tier 2": {"rpm": 5000, "tpm": 450000},
-                        "Tier 3": {"rpm": 10000, "tpm": 1000000},
-                        "Tier 4": {"rpm": 30000, "tpm": 5000000},
-                        "Tier 5": {"rpm": 80000, "tpm": 10000000},
+                        "Tier 1": {"rpm": 500, "tpm": 500000},
+                        "Tier 2": {"rpm": 5000, "tpm": 2000000},
+                        "Tier 3": {"rpm": 5000, "tpm": 4000000},
+                        "Tier 4": {"rpm": 10000, "tpm": 10000000},
+                        "Tier 5": {"rpm": 30000, "tpm": 180000000},
                     }
                 }
             }
@@ -411,20 +413,20 @@ def main():
             "env_var": "ANTHROPIC_API_KEY",
             "label": "Anthropic API Key",
             "models": {
-                "claude-3-7-sonnet-20250219": {
+                "claude-haiku-4-5-20251001": {
                     "tiers": {
                         "Tier 1": {"rpm": 50, "tpm": 50000},
-                        "Tier 2": {"rpm": 1000, "tpm": 100000},
-                        "Tier 3": {"rpm": 2000, "tpm": 200000},
-                        "Tier 4": {"rpm": 4000, "tpm": 400000},
+                        "Tier 2": {"rpm": 1000, "tpm": 450000},
+                        "Tier 3": {"rpm": 2000, "tpm": 1000000},
+                        "Tier 4": {"rpm": 4000, "tpm": 4000000},
                     }
                 },
-                "claude-3-5-haiku-20241022": {
+                "claude-sonnet-4-6": {
                     "tiers": {
-                        "Tier 1": {"rpm": 50, "tpm": 50000},
-                        "Tier 2": {"rpm": 1000, "tpm": 100000},
-                        "Tier 3": {"rpm": 2000, "tpm": 200000},
-                        "Tier 4": {"rpm": 4000, "tpm": 400000},
+                        "Tier 1": {"rpm": 50, "tpm": 30000},
+                        "Tier 2": {"rpm": 1000, "tpm": 450000},
+                        "Tier 3": {"rpm": 2000, "tpm": 800000},
+                        "Tier 4": {"rpm": 4000, "tpm": 2000000},
                     }
                 }
             }
@@ -433,18 +435,18 @@ def main():
             "env_var": "GEMINI_API_KEY",
             "label": "Gemini API Key",
             "models": {
-                "gemini-2.5-flash": {
+                "gemini-3.1-flash-lite-preview": {
                     "tiers": {
-                        "Free Tier": {"rpm": 10, "tpm": 250000},
+                        "Free Tier": {"rpm": 15, "tpm": 250000},
                         "Tier 1 (Paid)": {"rpm": 300, "tpm": 1000000},
                         "Tier 2 ($250+)": {"rpm": 1000, "tpm": 4000000},
                         "Tier 3 (Enterprise)": {"rpm": 2000, "tpm": 10000000},
                     }
                 },
-                "gemini-2.5-pro": {
+                "gemini-3-flash-preview": {
                     "tiers": {
-                        "Free Tier": {"rpm": 5, "tpm": 32000},
-                        "Tier 1 (Paid)": {"rpm": 300, "tpm": 1000000},
+                        "Free Tier": {"rpm": 10, "tpm": 250000},
+                        "Tier 1 (Paid)": {"rpm": 150, "tpm": 1000000},
                         "Tier 2 ($250+)": {"rpm": 1000, "tpm": 4000000},
                         "Tier 3 (Enterprise)": {"rpm": 2000, "tpm": 10000000},
                     }
@@ -509,7 +511,7 @@ def main():
         "Select Your Rate Limit Tier",
         options=available_tiers,
         key="tier_selector",
-        help="Select your API tier based on your account limits. Choose 'Custom' if you know your exact limits."
+        help="Select your API tier based on your account limits. Gemini preview models may have stricter limits — verify in AI Studio. Choose 'Custom' if you know your exact limits."
     )
 
     # Custom tier inputs
