@@ -36,6 +36,10 @@ MAX_BACKOFF_SECONDS = 30
 FATAL_STATUS_CODES = {401: "Invalid OpenRouter API key.",
                       402: "Insufficient OpenRouter credits for this model.",
                       404: "Model not found on OpenRouter."}
+# Input-price cap stops ($/M tokens). Denser at the low end, where most sensible choices are;
+# the top stop sits at flagship pricing (Opus-class), since nothing pricier is sensible for primers.
+PRICE_CAP_STOPS = (0.10, 0.25, 0.50, 0.75, 1.00, 1.50, 2.00, 3.00, 4.00, 5.00)
+DEFAULT_PRICE_CAP = 1.00
 # Preferred defaults, in order; the first one that survives the filters is pre-selected
 DEFAULT_MODEL_PREFERENCES = (
     "openai/gpt-6-luna",
@@ -456,10 +460,13 @@ def main():
 
     col1, col2 = st.columns([3, 1])
     with col1:
-        max_price = st.slider(
+        max_price = st.select_slider(
             "Max input price ($ per million tokens)",
-            min_value=0.10, max_value=20.0, value=1.0, step=0.05, format="$%.2f",
-            help="Hides models priced above this. Large books add up fast with premium models."
+            options=PRICE_CAP_STOPS,
+            value=DEFAULT_PRICE_CAP,
+            format_func=lambda p: f"${p:.2f}",
+            help="Hides models priced above this. Large books add up fast with premium models. "
+                 "The top stop covers flagship models; enter a model ID below to use anything pricier."
         )
     with col2:
         include_free = st.checkbox(

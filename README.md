@@ -12,7 +12,7 @@ A Streamlit application that enhances EPUB files with AI-generated pre-reading p
 - Upload and process EPUB files (up to 200MB)
 - **Any OpenRouter model**: the list is filtered to models that support structured output and fit your chapter size, sorted cheapest first
 - **Cost-aware model picker**: each model shows its input/output price per million tokens and an estimated total for the chapters you've selected
-- **Max-price filter**: hides models above your chosen input price (default $1.00 per million tokens)
+- **Max-price filter**: hides models above your chosen input price ($0.10–$5.00 per million tokens, default $1.00). Pricier models can still be used via the custom model ID field
 - **Optional free models**: opt in to OpenRouter's rate-limited free models for small jobs
 - **Actual cost report** after each run
 - Select specific chapters to summarize

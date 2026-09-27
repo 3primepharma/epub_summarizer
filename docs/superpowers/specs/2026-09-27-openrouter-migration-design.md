@@ -45,7 +45,7 @@ A model is kept when **all** of these hold:
 - The id doesn't end with `:batch` and doesn't start with `~`.
 - `expiration_date` is null or later than today.
 - `context_length` ≥ `min_context`, where `min_context = chars_per_chapter/4 + 450 (prompt) + 2000 (output headroom)`.
-- The input price per million is ≤ `max_input_price` (slider: $0.10–$20.00, default $1.00).
+- The input price per million is ≤ `max_input_price` (stepped slider: $0.10–$5.00, default $1.00; pricier models via custom model ID).
 - The id ends with `:free` only when `include_free=True`. Otherwise free models are excluded.
 
 The list is sorted by input price, then output price, then id.
