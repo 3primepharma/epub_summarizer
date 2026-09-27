@@ -395,7 +395,7 @@ def main():
     """)
 
     # --- 1. Upload -----------------------------------------------------------
-    st.markdown("### 1. Upload EPUB")
+    st.markdown("### Upload EPUB")
     uploaded_file = st.file_uploader(
         "Upload your EPUB file (max 200MB)",
         type=['epub'],
@@ -429,7 +429,7 @@ def main():
             st.warning("No chapters found in the uploaded EPUB file.")
 
     if chapters:
-        st.markdown("### 2. Select chapters")
+        st.markdown("### Select chapters")
         file_key = uploaded_file.file_id
         eligible = [i for i, c in enumerate(chapters) if c.char_count >= MIN_CHAPTER_CHARS]
 
@@ -452,7 +452,7 @@ def main():
         selected_chapters = [i for i in eligible if st.session_state.get(f"chapter_{file_key}_{i}")]
 
     # --- 3. Model ---------------------------------------------------------------
-    st.markdown("### 3. Choose a model")
+    st.markdown("### Choose a model")
 
     col1, col2 = st.columns([3, 1])
     with col1:
@@ -493,7 +493,9 @@ def main():
         estimate_counts = [chars_per_chapter]
         estimate_basis = "one full-length chapter (upload a book for a real estimate)"
 
-    labels = {m.id: format_label(m, estimate_cost(m, estimate_counts, chars_per_chapter)) for m in models}
+    # Labels hold only static prices: Streamlit freezes the closed selectbox's label, so a
+    # per-book estimate in the label would go stale as chapters are (de)selected.
+    labels = {m.id: format_label(m) for m in models}
     models_by_id = {m.id: m for m in models}
 
     selected_model: Optional[ModelInfo] = None
@@ -508,7 +510,6 @@ def main():
             key="model_id",
         )
         selected_model = models_by_id[selected_id]
-        st.caption(f"Estimates cover {estimate_basis}. Reasoning models may use more output tokens than estimated.")
     elif catalog:
         st.warning("No models match these filters. Raise the max price or pick a shorter text length.")
 
@@ -523,7 +524,12 @@ def main():
         if selected_model is None:
             st.warning(f"'{custom_id}' is not in the OpenRouter catalog, so its price is unknown.")
         else:
-            st.info(format_label(selected_model, estimate_cost(selected_model, estimate_counts, chars_per_chapter)))
+            st.caption(format_label(selected_model))
+
+    if selected_model is not None:
+        est = estimate_cost(selected_model, estimate_counts, chars_per_chapter)
+        st.info(f"**Estimated cost: {format_usd(est)}** for {estimate_basis} with {selected_model.id}. "
+                "Reasoning models may use more output tokens than estimated.")
 
     is_free_model = selected_model is not None and selected_model.is_free
     if is_free_model:
@@ -539,7 +545,7 @@ def main():
         concurrency = 1
 
     # --- 4. Generate -------------------------------------------------------------
-    st.markdown("### 4. Generate")
+    st.markdown("### Generate")
     api_key = st.text_input(
         "OpenRouter API Key",
         type="password",

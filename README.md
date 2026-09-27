@@ -1,60 +1,69 @@
 # EPUB Summary Generator
 
-A Streamlit application that enhances EPUB files by automatically generating AI-powered chapter summaries using Anthropic's Claude API. Each chapter summary includes a concise overview, key perspectives, implications, and thought-provoking questions.
+A Streamlit application that enhances EPUB files with AI-generated pre-reading primers for each chapter, using any model available on [OpenRouter](https://openrouter.ai). Each primer includes an orientation, key concepts, questions to hold while reading, and points of tension.
 
 ⚠️ **Important API Usage Notice**
-- Supports multiple LLM providers: OpenAI, Anthropic, and Google Gemini
-- **New**: Select your API tier to optimize batch processing based on your account's rate limits
-- Processes chapters in batches with intelligent rate limiting
-- Each chapter summary request processes a configurable amount of text (4k-100k characters)
-- **Costs**: Please check your provider's pricing for current rates
+- All requests go through OpenRouter using your own API key ([get one here](https://openrouter.ai/keys))
+- The model list and prices are fetched live from OpenRouter; the app shows an estimated cost for your book before you run it
 - You are responsible for all API costs incurred
 
 ## Features
 
 - Upload and process EPUB files (up to 200MB)
-- **Multi-provider support**: Choose between OpenAI, Anthropic, and Google Gemini
-- **Intelligent rate limiting**: Select your API tier for optimized batch processing
-- **Customizable buffer settings**: Choose between conservative, balanced, or aggressive rate limit usage
-- Select specific chapters for summarization
-- AI-generated chapter digests including:
-  - Concise chapter summary
-  - Key perspectives
-  - Important implications
-  - Dissenting opinions (opposing viewpoints)
-  - Thought-provoking questions
+- **Any OpenRouter model**: the list is filtered to models that support structured output and fit your chapter size, sorted cheapest first
+- **Cost-aware model picker**: each model shows its input/output price per million tokens and an estimated total for the chapters you've selected
+- **Max-price filter**: hides models above your chosen input price (default $1.00 per million tokens)
+- **Optional free models**: opt in to OpenRouter's rate-limited free models for small jobs
+- **Actual cost report** after each run
+- Select specific chapters to summarize
+- AI-generated chapter pre-reads including:
+  - At a Glance: brief orientation to the chapter
+  - Key Concepts: terms, ideas, and themes to prime your reading
+  - Questions to Hold: questions to consider while reading
+  - Points of Tension: areas of complexity, debate, or narrative tension
 - Configurable text length per chapter (4k to 100k characters)
-- Automatic batch processing with intelligent wait times
-- Download enhanced EPUB with embedded summaries
+- Parallel processing with automatic retries and backoff
+- Download enhanced EPUB with embedded pre-reads
 
 ## Prerequisites
 
-- Python 3.x
-- Anthropic API key ([Get one here](https://www.anthropic.com/))
+- [uv](https://docs.astral.sh/uv/) (installs Python 3.13 for the project automatically)
+- An OpenRouter API key with credits ([openrouter.ai/keys](https://openrouter.ai/keys))
 
 ## Installation
-``` bash
-pip install -r requirements.txt
+
+```bash
+uv sync
 ```
+
+This creates a project-local `.venv` with the locked dependency versions from `uv.lock`.
 
 ## Usage
 
 1. Run the Streamlit app:
-   ``` bash
-   streamlit run summarize_epub_streamlit.py
+   ```bash
+   uv run streamlit run summarize_epub_streamlit.py
    ```
-
 2. Open the provided URL in your browser
-3. Upload your EPUB file
-4. Select your preferred LLM provider (OpenAI, Anthropic, or Gemini)
-5. Choose the model you want to use
-6. **Select your API tier** based on your account (or use "Custom" for exact limits)
-7. Choose your rate limit buffer (Conservative, Balanced, or Aggressive)
-8. Enter your API key
-9. Select the text length per chapter
-10. Select chapters to summarize
-11. Click "Generate Summaries"
-12. Download the enhanced EPUB file
+3. Upload your EPUB file and choose the text length per chapter
+4. Select the chapters to summarize
+5. Choose a model. Adjust the max-price slider or include free models if you like. The estimate updates as you select chapters
+6. Set the number of parallel requests (default 4)
+7. Enter your OpenRouter API key and click "Generate Summaries"
+8. Download the enhanced EPUB file
+
+## Development
+
+```bash
+uv run pytest
+```
+
+After changing dependencies in `pyproject.toml`, refresh the lock file and the exported `requirements.txt` (used by Streamlit Community Cloud and the devcontainer):
+
+```bash
+uv lock --upgrade
+uv export --no-dev --no-hashes --no-emit-project -o requirements.txt
+```
 
 ## Where to Get EPUB Files
 
@@ -82,99 +91,44 @@ There are several excellent sources for obtaining EPUB files:
 
 ## Technical Details
 
-- Uses BeautifulSoup for HTML parsing
-- Implements parallel processing for chapter summarization using asyncio
-- Includes retry logic for API calls (3 attempts per chapter)
-- Preserves original EPUB structure and formatting
-- **Tier-based rate limiting**: Automatically calculates optimal batch sizes and wait times based on your API tier
-- **Dynamic throughput optimization**: Adjusts processing speed to maximize your account's capabilities
-- Supports PydanticAI for structured output across multiple LLM providers
-
-## Dependencies
-
-- streamlit
-- ebooklib
-- beautifulsoup4
-- pydantic-ai
-- asyncio
-- anthropic / openai / google-generativeai (depending on provider)
-
-## Rate Limit Tiers
-
-The application supports different API tiers for each provider:
-
-### OpenAI
-- Tier 1 (Free): 500 RPM, 200K TPM (gpt-4o-mini)
-- Tier 2-5: Progressively higher limits based on account spend
-
-### Anthropic
-- Tier 1: 50 RPM, 50K TPM
-- Tier 2-4: Progressively higher limits based on account spend
-
-### Google Gemini
-- Free Tier: 5-10 RPM, 32K-250K TPM
-- Tier 1 (Paid): 300 RPM, 1M TPM
-- Tier 2-3: Higher limits for enterprise customers
-
-**Custom Tier**: Enter your exact RPM and TPM limits if you know them
-
-### How to Check Your API Tier
-
-- **OpenAI**: Visit your [account limits page](https://platform.openai.com/account/limits)
-- **Anthropic**: Check your [account settings](https://console.anthropic.com/settings/limits)
-- **Google Gemini**: View your [quota page](https://console.cloud.google.com/apis/api/generativelanguage.googleapis.com/quotas) in Google Cloud Console
-
-### Buffer Settings
-
-Choose how aggressively to use your rate limits:
-- **Conservative (50%)**: Safest option, reduces risk of hitting rate limits
-- **Balanced (70%)**: Good balance between speed and safety (recommended)
-- **Aggressive (90%)**: Maximum speed, uses most of your available capacity
+- Uses BeautifulSoup for HTML parsing and ebooklib for reading and writing EPUBs
+- Uses PydanticAI's OpenRouter model for structured (`ChapterDigest`) output
+- The model catalog comes from `https://openrouter.ai/api/v1/models` (no key needed) and is cached for an hour, with a manual refresh button
+- Model filtering excludes routers, batch-only and alias variants, image/audio generation models, models without structured-output or tool support, expired models, and models whose context window is too small for the selected chapter length
+- Cost estimates assume ~4 characters per token, ~450 prompt tokens, and ~700 output tokens per chapter. Reasoning models may use more output tokens
+- Chapters are processed concurrently (bounded by "Parallel requests"). Each chapter is retried up to 4 times with exponential backoff, honouring `Retry-After`
+- An invalid key (401), insufficient credits (402), or unknown model (404) stops the run immediately
 
 ## Limitations
 
 - Maximum EPUB file size: 200MB
-- Maximum text processed per chapter: Configurable (4k to 100k characters)
-- Batch size and wait times calculated dynamically based on selected tier
+- Chapters shorter than 800 characters are skipped
+- Free models allow roughly 20 requests per minute and a limited number per day, so they only suit small jobs
 - Some EPUB files with complex formatting may not process correctly
-- Rate limits are per-account and may be shared across multiple applications
 
 ## Troubleshooting
 
-Common issues and solutions:
+1. **API key or credit errors (401 / 402)**
+   - Check the key at [openrouter.ai/keys](https://openrouter.ai/keys) and make sure there are no leading or trailing spaces
+   - Top up your credit balance, or pick a cheaper model
 
-1. **API Key Issues**
-   - Ensure your API key is valid and has sufficient credits
-   - Check that there are no leading/trailing spaces in the API key
-   - Verify you've selected the correct provider for your API key
+2. **Rate limit errors (429)**
+   - Lower "Parallel requests"
+   - Avoid free models for large books
 
-2. **Rate Limit Errors**
-   - Try selecting a lower tier if you're hitting rate limits
-   - Switch to "Conservative" buffer setting
-   - Check your actual tier in your provider's dashboard
-   - Consider using "Custom" tier with exact limits if issues persist
+3. **A model is missing from the list**
+   - Raise the max-price slider, or choose a shorter text length (some models have small context windows)
+   - Click "Refresh model list", or enter the model ID in the custom field
 
-3. **File Processing Errors**
-   - Verify your EPUB file is under 200MB
-   - Ensure the EPUB is not DRM protected
+4. **File processing errors**
+   - Verify your EPUB file is under 200MB and not DRM protected
    - Try converting the EPUB to a newer format using Calibre
-
-4. **Summary Generation Failures**
-   - The app includes automatic retry logic (3 attempts)
-   - If persistent failures occur, try processing fewer chapters at once
-   - Reduce the text length per chapter if chapters are very long
-
-5. **Slow Processing**
-   - Select a higher tier if your account supports it
-   - Use "Aggressive" buffer setting for faster processing
-   - Consider using a faster model (e.g., Haiku for Anthropic, gpt-4o-mini for OpenAI)
 
 ## Security Considerations
 
 - Your API key is never stored and is only used during the active session
-- Files are processed locally and are not stored permanently
-- Temporary files are automatically cleaned up after processing
-- No data is sent to external services except the text for summarization to Anthropic
+- Uploaded files are not stored permanently; temporary copies are deleted right after reading
+- Chapter text is sent only to OpenRouter (and the model provider it routes to)
 
 ## Contributing
 

@@ -152,10 +152,10 @@ def format_usd(amount: float) -> str:
     return f"${amount:.2f}"
 
 
-def format_label(model: ModelInfo, est_cost: float) -> str:
+def format_label(model: ModelInfo) -> str:
     if model.is_free:
         return f"{model.id} — free (rate-limited)"
     return (
         f"{model.id} — {format_usd(model.input_per_million)} in / "
-        f"{format_usd(model.output_per_million)} out per M — est. {format_usd(est_cost)}"
+        f"{format_usd(model.output_per_million)} out per M tokens"
     )

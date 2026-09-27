@@ -146,9 +146,9 @@ def test_format_usd(amount, text):
 
 def test_format_label():
     m = ModelInfo("a/x", "X", 100000, prompt_price=3e-7, completion_price=2.5e-6)
-    assert format_label(m, 0.04) == "a/x — $0.30 in / $2.50 out per M — est. $0.04"
+    assert format_label(m) == "a/x — $0.30 in / $2.50 out per M tokens"
     free = ModelInfo("a/x:free", "X", 100000, prompt_price=0, completion_price=0)
-    assert format_label(free, 0) == "a/x:free — free (rate-limited)"
+    assert format_label(free) == "a/x:free — free (rate-limited)"
 
 
 def test_find_model_ignores_suitability_filters_but_needs_prices():
