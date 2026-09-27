@@ -6,6 +6,7 @@ from openrouter_models import (
     ModelInfo,
     estimate_cost,
     filter_models,
+    find_model,
     format_label,
     format_usd,
     required_context,
@@ -148,3 +149,11 @@ def test_format_label():
     assert format_label(m, 0.04) == "a/x — $0.30 in / $2.50 out per M — est. $0.04"
     free = ModelInfo("a/x:free", "X", 100000, prompt_price=0, completion_price=0)
     assert format_label(free, 0) == "a/x:free — free (rate-limited)"
+
+
+def test_find_model_ignores_suitability_filters_but_needs_prices():
+    models = [raw("a/x:batch", prompt="0.000001"), raw("router/auto", prompt="-1", completion="-1")]
+    m = find_model(models, "a/x:batch")
+    assert m is not None and m.input_per_million == pytest.approx(1.0)
+    assert find_model(models, "router/auto") is None
+    assert find_model(models, "missing/model") is None

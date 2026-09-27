@@ -73,6 +73,11 @@ def _parse_model(raw: dict, today: date) -> ModelInfo | None:
     if expiration and date.fromisoformat(expiration) <= today:
         return None
 
+    return _priced_model(raw)
+
+
+def _priced_model(raw: dict) -> ModelInfo | None:
+    """Build a ModelInfo if the model has fixed, non-negative per-token prices."""
     pricing = raw.get("pricing") or {}
     try:
         prompt_price = float(pricing["prompt"])
@@ -82,6 +87,7 @@ def _parse_model(raw: dict, today: date) -> ModelInfo | None:
     if prompt_price < 0 or completion_price < 0:
         return None
 
+    model_id = raw.get("id", "")
     return ModelInfo(
         id=model_id,
         name=raw.get("name") or model_id,
@@ -115,6 +121,14 @@ def filter_models(
             continue
         models.append(model)
     return sorted(models, key=lambda m: (m.prompt_price, m.completion_price, m.id))
+
+
+def find_model(raw_models: list[dict], model_id: str) -> ModelInfo | None:
+    """Look up any catalog model by id (no suitability filtering), for user-entered model IDs."""
+    for raw in raw_models:
+        if raw.get("id") == model_id:
+            return _priced_model(raw)
+    return None
 
 
 def tokens_cost(model: ModelInfo, input_tokens: int, output_tokens: int) -> float:

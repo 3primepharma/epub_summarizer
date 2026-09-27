@@ -2,15 +2,47 @@ import streamlit as st
 import ebooklib
 from ebooklib import epub
 from bs4 import BeautifulSoup
-from typing import List, Tuple
+from typing import Callable, List, NamedTuple, Optional
+from dataclasses import dataclass, field
 import os
-import time
 import io
+import random
 import tempfile
 import asyncio
-from concurrent.futures import ThreadPoolExecutor
 from pydantic import BaseModel, Field
 from pydantic_ai import Agent
+from pydantic_ai.exceptions import ModelHTTPError
+from pydantic_ai.models.openrouter import OpenRouterModel
+from pydantic_ai.providers.openrouter import OpenRouterProvider
+from pydantic_ai.usage import RunUsage
+
+from openrouter_models import (
+    ModelInfo,
+    estimate_cost,
+    fetch_models,
+    filter_models,
+    find_model,
+    format_label,
+    format_usd,
+    required_context,
+    tokens_cost,
+)
+
+APP_TITLE = "EPUB Summary Generator"
+MIN_CHAPTER_CHARS = 800
+MAX_ATTEMPTS = 4
+MAX_BACKOFF_SECONDS = 30
+# Status codes that will fail identically for every chapter, so retrying is pointless
+FATAL_STATUS_CODES = {401: "Invalid OpenRouter API key.",
+                      402: "Insufficient OpenRouter credits for this model.",
+                      404: "Model not found on OpenRouter."}
+# Preferred defaults, in order; the first one that survives the filters is pre-selected
+DEFAULT_MODEL_PREFERENCES = (
+    "openai/gpt-6-luna",
+    "google/gemini-3.1-flash-lite",
+    "deepseek/deepseek-v4-flash",
+)
+
 
 class ChapterDigest(BaseModel):
     """Structured output model for chapter pre-reads"""
@@ -20,62 +52,91 @@ class ChapterDigest(BaseModel):
     questions_to_hold: List[str] = Field(description="2-3 questions to consider while reading")
     points_of_tension: List[str] = Field(description="2-3 areas of complexity, debate, or narrative tension")
 
+
+class Chapter(NamedTuple):
+    id: str
+    title: str
+    content: str
+    char_count: int
+
+
+class FatalAPIError(Exception):
+    """An API error that makes further requests pointless (bad key, no credits, unknown model)."""
+
+
+@dataclass
+class RunResult:
+    output_bytes: bytes
+    summaries: List[tuple] = field(default_factory=list)  # (chapter index, title, summary)
+    succeeded: int = 0
+    failed: int = 0
+    input_tokens: int = 0
+    output_tokens: int = 0
+    reported_cost: Optional[float] = 0.0  # None once any request lacks an OpenRouter-reported cost
+
+
+def extract_chapters(epub_bytes: bytes) -> List[Chapter]:
+    """Extract document items from an EPUB file."""
+    with tempfile.NamedTemporaryFile(delete=False, suffix='.epub') as temp_input:
+        temp_input.write(epub_bytes)
+        temp_input_path = temp_input.name
+    try:
+        book = epub.read_epub(temp_input_path)
+    finally:
+        os.remove(temp_input_path)
+
+    chapters = []
+    for item in book.get_items():
+        if item.get_type() == ebooklib.ITEM_DOCUMENT:
+            soup = BeautifulSoup(item.get_content(), 'html.parser')
+            title = soup.find(['h1', 'h2'])
+            title = title.get_text().strip() if title else "Untitled Chapter"
+            chapters.append(Chapter(item.id, title, str(soup), len(soup.get_text())))
+    return chapters
+
+
+def _ensure_toc_uids(toc, counter=None) -> None:
+    """Give every TOC entry a uid. ebooklib builds nav-derived TOC links without one,
+    which makes write_epub fail when generating the NCX."""
+    counter = counter if counter is not None else iter(range(1, 1_000_000))
+    for entry in toc:
+        if isinstance(entry, tuple):  # (Section, [children])
+            section, children = entry
+            _ensure_toc_uids([section], counter)
+            _ensure_toc_uids(children, counter)
+        elif getattr(entry, "uid", "") is None:
+            entry.uid = f"toc-{next(counter)}"
+
+
+def read_book(epub_bytes: bytes) -> epub.EpubBook:
+    with tempfile.NamedTemporaryFile(delete=False, suffix='.epub') as temp_input:
+        temp_input.write(epub_bytes)
+        temp_input_path = temp_input.name
+    try:
+        book = epub.read_epub(temp_input_path)
+    finally:
+        os.remove(temp_input_path)
+    _ensure_toc_uids(book.toc)
+    return book
+
+
 class EPUBSummaryInserter:
-    def __init__(self, provider: str, model: str, api_key: str, chars_per_chapter: int):
+    def __init__(self, model_id: str, api_key: str, chars_per_chapter: int):
         if not api_key:
             raise ValueError("API key is required")
-        
-        self.provider = provider
-        self.model = model
-        self.api_key = api_key
+
+        self.model_id = model_id
         self.chars_per_chapter = chars_per_chapter
-        self.agent = self._initialize_agent()
-    
-    def _initialize_agent(self):
-        """Initialize PydanticAI agent with the selected model"""
-        # Configure environment variables for the selected provider
-        if self.provider == "openai":
-            os.environ["OPENAI_API_KEY"] = self.api_key
-            model_name = f"openai:{self.model}"
-        elif self.provider == "anthropic":
-            os.environ["ANTHROPIC_API_KEY"] = self.api_key
-            model_name = f"anthropic:{self.model}"
-        elif self.provider == "gemini":
-            os.environ["GEMINI_API_KEY"] = self.api_key
-            model_name = f"google-gla:{self.model}"
-        
-        # Initialize PydanticAI agent with the selected model
-        return Agent(model_name, output_type=ChapterDigest)
+        # Key is passed to the provider directly rather than via os.environ,
+        # so concurrent Streamlit sessions can't see each other's keys.
+        provider = OpenRouterProvider(api_key=api_key, app_title=APP_TITLE)
+        self.agent = Agent(OpenRouterModel(model_id, provider=provider), output_type=ChapterDigest)
 
-    def extract_chapters(self, epub_file_path: str) -> List[Tuple[str, str, str, int]]:
-        """
-        Extract chapters from EPUB file.
-        Returns list of tuples: (chapter_id, title, content, char_count)
-        """
-        book = epub.read_epub(epub_file_path)
-        chapters = []
-        
-        for item in book.get_items():
-            if item.get_type() == ebooklib.ITEM_DOCUMENT:
-                soup = BeautifulSoup(item.get_content(), 'html.parser')
-                title = soup.find(['h1', 'h2'])
-                title = title.get_text().strip() if title else "Untitled Chapter"
-                content = str(soup)
-                # Get actual character count of cleaned text
-                char_count = len(BeautifulSoup(content, 'html.parser').get_text())
-                chapters.append((item.id, title, content, char_count))
-        
-        return chapters
-
-    async def get_chapter_summary(self, content: str, chapter_title: str = "Chapter") -> str:
-        """Get AI-generated summary for chapter content using PydanticAI"""
-        # Create a container for status messages that will be overwritten
-        status_container = st.empty()
-        
+    def build_prompt(self, content: str) -> str:
         # Strip HTML tags for cleaner text
         text = BeautifulSoup(content, 'html.parser').get_text()
-        
-        prompt = f"""Analyze this chapter and create a pre-reading primer to help the reader engage more deeply with the material.
+
+        return f"""Analyze this chapter and create a pre-reading primer to help the reader engage more deeply with the material.
 
 <chapter>
 {text[:self.chars_per_chapter]}
@@ -100,25 +161,13 @@ For fiction: conflicts, thematic tensions, or narrative questions being develope
 For news: context that adds depth or complexity to the reporting.
 """
 
-        max_retries = 3
-        for attempt in range(max_retries):
-            try:
-                status_container.info(f'Attempt {attempt + 1}/{max_retries}: Generating summary...')
-                
-                # Use PydanticAI to generate the summary
-                message_placeholder = st.empty()
-                
-                # The 'run' method is more direct for getting a single structured output
-                # compared to 'run_stream'.
-                result = await self.agent.run(prompt)
-                digest = result.output
-                
-                # Format the digest into a readable string
-                key_concepts = "\n".join(f"• {c}" for c in digest.key_concepts)
-                questions = "\n".join(f"• {q}" for q in digest.questions_to_hold)
-                tensions = "\n".join(f"• {t}" for t in digest.points_of_tension)
+    @staticmethod
+    def format_digest(digest: ChapterDigest) -> str:
+        key_concepts = "\n".join(f"• {c}" for c in digest.key_concepts)
+        questions = "\n".join(f"• {q}" for q in digest.questions_to_hold)
+        tensions = "\n".join(f"• {t}" for t in digest.points_of_tension)
 
-                formatted_digest = f"""{digest.at_a_glance}
+        return f"""{digest.at_a_glance}
 
 **Key Concepts**
 {key_concepts}
@@ -127,32 +176,47 @@ For news: context that adds depth or complexity to the reporting.
 {questions}
 
 **Points of Tension**
-{tensions}"""
-                
-                # Clear the message placeholder instead of showing success message
-                message_placeholder.empty()
-                
-                # Clear status message on success
-                status_container.empty()
-                
-                return formatted_digest.strip()
-                
+{tensions}""".strip()
+
+    async def get_chapter_summary(self, content: str, chapter_title: str,
+                                  on_status: Callable[[str], None]) -> tuple[str, RunUsage]:
+        """Generate a digest for one chapter, retrying transient failures with exponential backoff."""
+        prompt = self.build_prompt(content)
+
+        for attempt in range(1, MAX_ATTEMPTS + 1):
+            retry_after = None
+            try:
+                result = await self.agent.run(prompt)
+                return self.format_digest(result.output), result.usage
+            except ModelHTTPError as e:
+                if e.status_code in FATAL_STATUS_CODES:
+                    raise FatalAPIError(f"{FATAL_STATUS_CODES[e.status_code]} ({e.body})") from e
+                if attempt == MAX_ATTEMPTS:
+                    raise
+                if e.status_code == 429 and e.headers:
+                    retry_after = e.headers.get('retry-after')
+                error = e
             except Exception as e:
-                if attempt < max_retries - 1:
-                    status_container.warning(f"Attempt {attempt + 1} failed: {str(e)}. Retrying...")
-                    await asyncio.sleep(5)
-                else:
-                    status_container.error(f"All {max_retries} attempts failed for chapter summary. Skipping...")
-                    return ""
+                if attempt == MAX_ATTEMPTS:
+                    raise
+                error = e
+
+            try:
+                delay = min(MAX_BACKOFF_SECONDS, float(retry_after))
+            except (TypeError, ValueError):
+                delay = min(MAX_BACKOFF_SECONDS, 2 ** attempt + random.uniform(0, 1))
+            on_status(f"'{chapter_title}': attempt {attempt}/{MAX_ATTEMPTS} failed "
+                      f"({type(error).__name__}); retrying in {delay:.0f}s...")
+            await asyncio.sleep(delay)
 
     def insert_summary(self, html_content: str, summary: str) -> str:
         """Insert summary at the start of chapter content in an EPUB-friendly way"""
         soup = BeautifulSoup(html_content, 'html.parser')
-        
+
         # Create summary div with semantic class names instead of inline styles
         summary_div = soup.new_tag('div')
         summary_div['class'] = 'chapter-digest'
-        
+
         # Create a style tag for the head if it doesn't exist
         if not soup.find('style'):
             style_tag = soup.new_tag('style')
@@ -188,17 +252,17 @@ For news: context that adds depth or complexity to the reporting.
                     html.append(head)
                     soup.append(html)
             head.append(style_tag)
-        
+
         # Split the summary into sections and format them
         sections = summary.split('\n\n')
         for section in sections:
             section_div = soup.new_tag('div')
             section_div['class'] = 'section'
-            
+
             # Convert the text to semantic HTML
             lines = section.strip().split('\n')
             current_list = None
-            
+
             for line in lines:
                 if line.strip():
                     if line.startswith('•'):
@@ -216,148 +280,107 @@ For news: context that adds depth or complexity to the reporting.
                             p['class'] = 'heading'
                         p.string = line.replace('**', '')
                         section_div.append(p)
-            
+
             summary_div.append(section_div)
-        
+
         # Insert at start of body or main content
         body = soup.find('body') or soup
         body.insert(0, summary_div)
-        
+
         return str(soup)
-    
-    async def process_selected_chapters(self, selected_indices: List[int], chapters: List[Tuple[str, str, str, int]], book: epub.EpubBook, batch_size: int, batch_wait: int) -> bytes:
-        """Process and insert summaries for selected chapters in parallel batches"""
-        # Filter out chapters that are too short (less than 400 characters)
-        valid_indices = [i for i in selected_indices if 0 <= i < len(chapters) and chapters[i][3] >= 800]
-        
-        if len(valid_indices) < len(selected_indices):
-            skipped_count = len(selected_indices) - len(valid_indices)
-            st.warning(f"Skipping {skipped_count} chapter(s) that are too short (less than 800 characters)")
-        
-        if not valid_indices:
-            st.error("No valid chapters to process after filtering out short chapters")
+
+    async def process_selected_chapters(self, selected_indices: List[int], chapters: List[Chapter],
+                                        book: epub.EpubBook, concurrency: int) -> Optional[RunResult]:
+        """Summarize selected chapters concurrently and return the updated EPUB."""
+        progress_bar = st.progress(0.0, text=f"0 / {len(selected_indices)} chapters")
+        status_line = st.empty()
+        semaphore = asyncio.Semaphore(concurrency)
+        result = RunResult(output_bytes=b"")
+
+        async def process_chapter(i: int):
+            chapter = chapters[i]
+            async with semaphore:
+                try:
+                    summary, usage = await self.get_chapter_summary(
+                        chapter.content, chapter.title, status_line.info)
+                    return i, summary, usage, None
+                except FatalAPIError:
+                    raise
+                except Exception as e:
+                    return i, None, None, e
+
+        tasks = [asyncio.create_task(process_chapter(i)) for i in selected_indices]
+        try:
+            for done, next_task in enumerate(asyncio.as_completed(tasks), start=1):
+                i, summary, usage, error = await next_task
+                chapter = chapters[i]
+                if error is not None:
+                    result.failed += 1
+                    st.warning(f"Failed to summarize '{chapter.title}' after {MAX_ATTEMPTS} attempts: {error}")
+                else:
+                    book.get_item_with_id(chapter.id).set_content(
+                        self.insert_summary(chapter.content, summary).encode())
+                    result.succeeded += 1
+                    result.summaries.append((i, chapter.title, summary))
+                    result.input_tokens += usage.input_tokens
+                    result.output_tokens += usage.output_tokens
+                    if usage.cost is None or result.reported_cost is None:
+                        result.reported_cost = None
+                    else:
+                        result.reported_cost += float(usage.cost)
+                progress_bar.progress(done / len(tasks), text=f"{done} / {len(tasks)} chapters")
+        except FatalAPIError as e:
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            status_line.empty()
+            st.error(f"Stopped: {e}")
             return None
 
-        # Calculate total characters for selected chapters
-        total_chars = sum(min(chapters[i][3], self.chars_per_chapter) for i in valid_indices)
-        avg_chars_per_chapter = total_chars / len(valid_indices) if valid_indices else 0
-        
-        # Adjust batch size based on actual content size
-        adjusted_batch_size = min(
-            batch_size,
-            int(self.chars_per_chapter * batch_size / max(avg_chars_per_chapter, 1))
-        )
-        
-        # Adjust wait time proportionally
-        adjusted_wait = max(5, int(batch_wait * avg_chars_per_chapter / self.chars_per_chapter))
-        
-        st.info(f"""
-            Optimized Processing Parameters:
-            - Average characters per chapter: {int(avg_chars_per_chapter):,}
-            - Adjusted batch size: {adjusted_batch_size} chapters
-            - Adjusted wait time: {adjusted_wait} seconds
-        """)
-        
-        progress_bar = st.progress(0)
-        current_batch = st.empty()
-        
-        with st.container():
-            st.markdown("### Processing Status")
-            status_container = st.empty()
-        
-        BATCH_SIZE = adjusted_batch_size
-        BATCH_WAIT = adjusted_wait  # seconds
-        processed_chapters = 0
-        successful_chapters = 0
-        failed_chapters = 0
-        
-        # Store processed summaries for review section
-        processed_summaries = []
-        
-        async def process_chapter(i: int) -> Tuple[str, str, str, bool]:
-            chapter_id, title, content, _ = chapters[i]
-            try:
-                summary = await self.get_chapter_summary(content, title)
-                if summary:
-                    modified_content = self.insert_summary(content, summary)
-                    return (chapter_id, modified_content, summary, True)
-                return (chapter_id, "", "", False)
-            except Exception as e:
-                st.error(f"Error processing {title}: {str(e)}")
-                return (chapter_id, "", "", False)
+        status_line.empty()
+        result.summaries.sort()  # reading order for the review section
 
-        # Process chapters in batches
-        for batch_start in range(0, len(valid_indices), BATCH_SIZE):
-            batch_indices = valid_indices[batch_start:batch_start + BATCH_SIZE]
-            current_batch.write(f"📖 Processing batch {batch_start//BATCH_SIZE + 1}")
-            
-            # Process batch concurrently
-            tasks = [process_chapter(i) for i in batch_indices]
-            batch_results = await asyncio.gather(*tasks)
-            
-            # Update book with results and collect summaries
-            for i, (chapter_id, content, summary, success) in enumerate(batch_results):
-                if success and content:
-                    # Update the book content
-                    for item in book.get_items():
-                        if item.id == chapter_id:
-                            item.set_content(content.encode())
-                            processed_chapters += 1
-                            successful_chapters += 1
-                            progress_bar.progress(processed_chapters / len(valid_indices))
-                    
-                    # Store summary for review section
-                    chapter_index = batch_indices[i]
-                    chapter_title = chapters[chapter_index][1]
-                    processed_summaries.append((chapter_title, summary))
-                else:
-                    failed_chapters += 1
-            
-            # Wait between batches if there are more chapters to process
-            if batch_start + BATCH_SIZE < len(valid_indices):
-                status_container.info(f"Waiting {BATCH_WAIT} seconds before processing next batch...")
-                await asyncio.sleep(BATCH_WAIT)
+        output = io.BytesIO()
+        epub.write_epub(output, book)
+        result.output_bytes = output.getvalue()
+        return result
 
-        current_batch.empty()
-        status_container.empty()
-        
-        # Save modified book first
-        with tempfile.NamedTemporaryFile(delete=False, suffix='.epub') as temp_output:
-            epub.write_epub(temp_output.name, book)
-            temp_output_path = temp_output.name
-        
-        with open(temp_output_path, 'rb') as f:
-            output_bytes = f.read()
-        
-        os.remove(temp_output_path)
-        
-        return output_bytes, processed_summaries, successful_chapters, failed_chapters
+
+@st.cache_data(ttl=3600, show_spinner="Loading OpenRouter model list...")
+def load_model_catalog() -> list[dict]:
+    return fetch_models()
+
+
+@st.cache_data(show_spinner="Reading EPUB...")
+def load_chapters(epub_bytes: bytes) -> List[Chapter]:
+    return extract_chapters(epub_bytes)
+
+
+def default_model_index(models: List[ModelInfo]) -> int:
+    ids = [m.id for m in models]
+    for preferred in DEFAULT_MODEL_PREFERENCES:
+        if preferred in ids:
+            return ids.index(preferred)
+    return 0
+
 
 def main():
-    st.set_page_config(page_title="EPUB Summary Generator", layout="wide")
-    
-    # Add some custom CSS
+    st.set_page_config(page_title=APP_TITLE, layout="wide")
+
     st.markdown("""
         <style>
         .stApp {
             max-width: 1200px;
             margin: 0 auto;
         }
-        .upload-section {
-            padding: 2rem;
-            border-radius: 10px;
-            border: 2px dashed #cccccc;
-            margin-bottom: 2rem;
-        }
         </style>
     """, unsafe_allow_html=True)
-    
+
     st.title("📚 EPUB Summary Generator")
-    
-    # Add key information from README
+
     st.markdown("""
-        Enhance your EPUB files with AI-powered pre-reading primers using multiple LLM providers.
-        Each chapter pre-read includes:
+        Enhance your EPUB files with AI-powered pre-reading primers, using any model available on
+        [OpenRouter](https://openrouter.ai). Each chapter pre-read includes:
         - At a Glance: Brief orientation to the chapter
         - Key Concepts: Terms, ideas, and themes to prime your reading
         - Questions to Hold: Thought-provoking questions to consider while reading
@@ -366,209 +389,19 @@ def main():
         **Generated pre-reads are integrated seamlessly to the start of each chapter to activate your thinking before diving into the material**
 
         ⚠️ **Important Usage Notes:**
-        - Supports OpenAI, Anthropic, and Google Gemini models
-        - Content-adaptive: adjusts output based on fiction, non-fiction, news, etc.
-        - By default, processes chapters in batches with cooling periods based on provider rate limits
+        - Requires an [OpenRouter API key](https://openrouter.ai/keys); you are responsible for all API costs
+        - Model prices are fetched live from OpenRouter; cost estimates are approximate
         - Maximum file size: 200MB
-        - You are responsible for all API costs - check your provider's pricing
     """)
-    
-    # File upload section
-    st.markdown("### Upload EPUB")
+
+    # --- 1. Upload -----------------------------------------------------------
+    st.markdown("### 1. Upload EPUB")
     uploaded_file = st.file_uploader(
         "Upload your EPUB file (max 200MB)",
         type=['epub'],
         help="Supported sources: Project Gutenberg, Instapaper, Calibre conversions, and more"
     )
-    
-    # Provider and model selection with tier-based rate limits.
-    # TPM values reflect input-token-per-minute (ITPM) limits where providers
-    # split input/output, since chapter ingestion is input-bound.
-    provider_options = {
-        "OpenAI": {
-            "env_var": "OPENAI_API_KEY",
-            "label": "OpenAI API Key",
-            "models": {
-                "gpt-5.4-nano": {
-                    "tiers": {
-                        "Tier 1": {"rpm": 500, "tpm": 200000},
-                        "Tier 2": {"rpm": 5000, "tpm": 2000000},
-                        "Tier 3": {"rpm": 5000, "tpm": 4000000},
-                        "Tier 4": {"rpm": 10000, "tpm": 10000000},
-                        "Tier 5": {"rpm": 30000, "tpm": 180000000},
-                    }
-                },
-                "gpt-5.4-mini": {
-                    "tiers": {
-                        "Tier 1": {"rpm": 500, "tpm": 500000},
-                        "Tier 2": {"rpm": 5000, "tpm": 2000000},
-                        "Tier 3": {"rpm": 5000, "tpm": 4000000},
-                        "Tier 4": {"rpm": 10000, "tpm": 10000000},
-                        "Tier 5": {"rpm": 30000, "tpm": 180000000},
-                    }
-                }
-            }
-        },
-        "Anthropic": {
-            "env_var": "ANTHROPIC_API_KEY",
-            "label": "Anthropic API Key",
-            "models": {
-                "claude-haiku-4-5-20251001": {
-                    "tiers": {
-                        "Tier 1": {"rpm": 50, "tpm": 50000},
-                        "Tier 2": {"rpm": 1000, "tpm": 450000},
-                        "Tier 3": {"rpm": 2000, "tpm": 1000000},
-                        "Tier 4": {"rpm": 4000, "tpm": 4000000},
-                    }
-                },
-                "claude-sonnet-4-6": {
-                    "tiers": {
-                        "Tier 1": {"rpm": 50, "tpm": 30000},
-                        "Tier 2": {"rpm": 1000, "tpm": 450000},
-                        "Tier 3": {"rpm": 2000, "tpm": 800000},
-                        "Tier 4": {"rpm": 4000, "tpm": 2000000},
-                    }
-                }
-            }
-        },
-        "Gemini": {
-            "env_var": "GEMINI_API_KEY",
-            "label": "Gemini API Key",
-            "models": {
-                "gemini-3.1-flash-lite-preview": {
-                    "tiers": {
-                        "Free Tier": {"rpm": 15, "tpm": 250000},
-                        "Tier 1 (Paid)": {"rpm": 300, "tpm": 1000000},
-                        "Tier 2 ($250+)": {"rpm": 1000, "tpm": 4000000},
-                        "Tier 3 (Enterprise)": {"rpm": 2000, "tpm": 10000000},
-                    }
-                },
-                "gemini-3-flash-preview": {
-                    "tiers": {
-                        "Free Tier": {"rpm": 10, "tpm": 250000},
-                        "Tier 1 (Paid)": {"rpm": 150, "tpm": 1000000},
-                        "Tier 2 ($250+)": {"rpm": 1000, "tpm": 4000000},
-                        "Tier 3 (Enterprise)": {"rpm": 2000, "tpm": 10000000},
-                    }
-                }
-            }
-        }
-    }
 
-    def on_provider_change():
-        """Callback to reset model selection when provider changes."""
-        provider = st.session_state.provider_selector
-        first_model = list(provider_options[provider]["models"].keys())[0]
-        st.session_state.model_selector = first_model
-
-        # Reset tier selection when provider changes
-        first_tier = list(provider_options[provider]["models"][first_model]["tiers"].keys())[0]
-        st.session_state.tier_selector = first_tier
-
-    def on_model_change():
-        """Callback to reset tier selection when model changes."""
-        provider = st.session_state.provider_selector
-        model = st.session_state.model_selector
-        first_tier = list(provider_options[provider]["models"][model]["tiers"].keys())[0]
-        st.session_state.tier_selector = first_tier
-
-    # Initialize session state for selectors if they don't exist
-    if "provider_selector" not in st.session_state:
-        st.session_state.provider_selector = list(provider_options.keys())[0]
-
-    current_provider_models = list(provider_options[st.session_state.provider_selector]["models"].keys())
-    if "model_selector" not in st.session_state or st.session_state.model_selector not in current_provider_models:
-        st.session_state.model_selector = current_provider_models[0]
-
-    # Initialize tier selector
-    if "tier_selector" not in st.session_state:
-        first_tier = list(provider_options[st.session_state.provider_selector]["models"][st.session_state.model_selector]["tiers"].keys())[0]
-        st.session_state.tier_selector = first_tier
-
-    selected_provider = st.selectbox(
-        "Select LLM Provider",
-        options=list(provider_options.keys()),
-        key="provider_selector",
-        on_change=on_provider_change,
-        help="Choose your preferred LLM provider"
-    )
-
-    # Get models for the selected provider
-    available_models = list(provider_options[selected_provider]["models"].keys())
-    selected_model = st.selectbox(
-        f"Select {selected_provider} Model",
-        options=available_models,
-        key="model_selector",
-        on_change=on_model_change,
-        help=f"Choose which {selected_provider} model to use"
-    )
-
-    # Get tiers for the selected model
-    available_tiers = list(provider_options[selected_provider]["models"][selected_model]["tiers"].keys())
-    available_tiers.append("Custom")  # Add custom option
-
-    selected_tier = st.selectbox(
-        "Select Your Rate Limit Tier",
-        options=available_tiers,
-        key="tier_selector",
-        help="Select your API tier based on your account limits. Gemini preview models may have stricter limits — verify in AI Studio. Choose 'Custom' if you know your exact limits."
-    )
-
-    # Custom tier inputs
-    if selected_tier == "Custom":
-        st.markdown("**Custom Rate Limits**")
-        col1, col2 = st.columns(2)
-        with col1:
-            custom_rpm = st.number_input(
-                "Requests Per Minute (RPM)",
-                min_value=1,
-                value=100,
-                help="Your account's requests per minute limit"
-            )
-        with col2:
-            custom_tpm = st.number_input(
-                "Tokens Per Minute (TPM)",
-                min_value=1000,
-                value=100000,
-                help="Your account's tokens per minute limit"
-            )
-        requests_per_minute = custom_rpm
-        tokens_per_minute = custom_tpm
-    else:
-        # Get rate limits for selected tier
-        rate_limits = provider_options[selected_provider]["models"][selected_model]["tiers"][selected_tier]
-        requests_per_minute = rate_limits["rpm"]
-        tokens_per_minute = rate_limits["tpm"]
-
-    # Update API key input label based on selected provider
-    api_key = st.text_input(
-        provider_options[selected_provider]["label"],
-        type="password",
-        help="Your API key will not be stored"
-    )
-
-    # Get provider key for initialization
-    provider_key = selected_provider.lower()
-
-    # Add buffer/safety factor selection
-    buffer_options = {
-        "Conservative (50% of limits)": 0.5,
-        "Balanced (70% of limits)": 0.7,
-        "Aggressive (90% of limits)": 0.9,
-    }
-    selected_buffer = st.selectbox(
-        "Rate Limit Buffer",
-        options=list(buffer_options.keys()),
-        index=1,  # Default to Balanced
-        help="How much of your rate limit to use. Conservative is safer for shared accounts or variable network conditions."
-    )
-    buffer_factor = buffer_options[selected_buffer]
-
-    # Apply buffer to rate limits
-    effective_rpm = int(requests_per_minute * buffer_factor)
-    effective_tpm = int(tokens_per_minute * buffer_factor)
-
-    # Add text length selection
     length_options = {
         "Short (1-2 pages, 4k chars)": 4000,
         "Medium (<15 pages, 20k chars)": 20000,
@@ -576,183 +409,211 @@ def main():
         "Long (30-50 pages, 100k chars)": 100000
     }
     selected_length = st.selectbox(
-        "Select text length per chapter",
+        "Text length per chapter",
         options=list(length_options.keys()),
         index=0,
-        help="Choose based on your typical chapter length"
+        help="Only this many characters of each chapter are sent to the model"
+    )
+    chars_per_chapter = length_options[selected_length]
+
+    # --- 2. Chapters -----------------------------------------------------------
+    chapters: List[Chapter] = []
+    selected_chapters: List[int] = []
+    if uploaded_file:
+        try:
+            chapters = load_chapters(uploaded_file.getvalue())
+        except Exception as e:
+            st.error(f"Could not read EPUB: {e}")
+
+        if uploaded_file and not chapters:
+            st.warning("No chapters found in the uploaded EPUB file.")
+
+    if chapters:
+        st.markdown("### 2. Select chapters")
+        file_key = uploaded_file.file_id
+        eligible = [i for i, c in enumerate(chapters) if c.char_count >= MIN_CHAPTER_CHARS]
+
+        def set_all(value: bool):
+            for i in eligible:
+                st.session_state[f"chapter_{file_key}_{i}"] = value
+
+        col1, col2, _ = st.columns([1, 1, 4])
+        col1.button("Select all", on_click=set_all, args=(True,))
+        col2.button("Clear", on_click=set_all, args=(False,))
+
+        with st.expander(f"Chapters ({len(eligible)} of {len(chapters)} long enough to summarize)", expanded=True):
+            for i, chapter in enumerate(chapters):
+                too_short = i not in eligible
+                label = f"{chapter.title} — {chapter.char_count:,} chars"
+                if too_short:
+                    label += f" (under {MIN_CHAPTER_CHARS} chars, skipped)"
+                st.checkbox(label, key=f"chapter_{file_key}_{i}", disabled=too_short)
+
+        selected_chapters = [i for i in eligible if st.session_state.get(f"chapter_{file_key}_{i}")]
+
+    # --- 3. Model ---------------------------------------------------------------
+    st.markdown("### 3. Choose a model")
+
+    col1, col2 = st.columns([3, 1])
+    with col1:
+        max_price = st.slider(
+            "Max input price ($ per million tokens)",
+            min_value=0.10, max_value=20.0, value=1.0, step=0.05, format="$%.2f",
+            help="Hides models priced above this. Large books add up fast with premium models."
+        )
+    with col2:
+        include_free = st.checkbox(
+            "Include free models",
+            help="Free models are heavily rate-limited (about 20 requests/min and a small daily cap)."
+        )
+        if st.button("🔄 Refresh model list"):
+            load_model_catalog.clear()
+
+    catalog: list[dict] = []
+    try:
+        catalog = load_model_catalog()
+    except Exception as e:
+        st.error(f"Could not load the OpenRouter model list ({e}). Enter a model ID below instead.")
+
+    models = filter_models(
+        catalog,
+        min_context=required_context(chars_per_chapter),
+        max_input_price=max_price,
+        include_free=include_free,
     )
 
-    if uploaded_file and api_key:
-        try:
-            # Get character limit for chapters
-            chars_per_chapter = length_options[selected_length]
-            
-            # Initialize processor with selected provider, model, and character limit
-            processor = EPUBSummaryInserter(
-                provider=provider_key,
-                model=selected_model,
-                api_key=api_key,
-                chars_per_chapter=chars_per_chapter
-            )
-            
-            # Extract chapters first to get actual sizes
-            with tempfile.NamedTemporaryFile(delete=False, suffix='.epub') as temp_input:
-                temp_input.write(uploaded_file.getvalue())
-                temp_input_path = temp_input.name
-            
-            book = epub.read_epub(temp_input_path)
-            chapters = processor.extract_chapters(temp_input_path)
-            os.remove(temp_input_path)
+    # Estimate cost over the chapters that would actually be sent
+    if selected_chapters:
+        estimate_counts = [chapters[i].char_count for i in selected_chapters]
+        estimate_basis = f"{len(estimate_counts)} selected chapter(s)"
+    elif chapters:
+        estimate_counts = [c.char_count for c in chapters if c.char_count >= MIN_CHAPTER_CHARS]
+        estimate_basis = f"all {len(estimate_counts)} eligible chapter(s)"
+    else:
+        estimate_counts = [chars_per_chapter]
+        estimate_basis = "one full-length chapter (upload a book for a real estimate)"
 
-            if chapters:
-                # Calculate average actual chapter size
-                avg_chapter_size = sum(min(chapter[3], chars_per_chapter) for chapter in chapters) / len(chapters)
+    labels = {m.id: format_label(m, estimate_cost(m, estimate_counts, chars_per_chapter)) for m in models}
+    models_by_id = {m.id: m for m in models}
 
-                # Calculate batch parameters considering token limits and request limits
-                # Estimate tokens per chapter (roughly 4 chars per token)
-                tokens_per_chapter = avg_chapter_size / 4
+    selected_model: Optional[ModelInfo] = None
+    if models:
+        if st.session_state.get("model_id") not in models_by_id:
+            st.session_state.pop("model_id", None)
+        selected_id = st.selectbox(
+            f"Model ({len(models)} available, cheapest first — type to search)",
+            options=list(models_by_id),
+            index=default_model_index(models),
+            format_func=labels.get,
+            key="model_id",
+        )
+        selected_model = models_by_id[selected_id]
+        st.caption(f"Estimates cover {estimate_basis}. Reasoning models may use more output tokens than estimated.")
+    elif catalog:
+        st.warning("No models match these filters. Raise the max price or pick a shorter text length.")
 
-                # Calculate batch size based on token limits
-                tokens_batch_size = effective_tpm // max(int(tokens_per_chapter), 1)
+    custom_id = st.text_input(
+        "Custom model ID (optional, overrides the list above)",
+        placeholder="e.g. anthropic/claude-sonnet-5",
+        help="Any OpenRouter model ID. It must support structured outputs or tool calling."
+    ).strip()
+    model_id = custom_id or (selected_model.id if selected_model else "")
+    if custom_id:
+        selected_model = find_model(catalog, custom_id)
+        if selected_model is None:
+            st.warning(f"'{custom_id}' is not in the OpenRouter catalog, so its price is unknown.")
+        else:
+            st.info(format_label(selected_model, estimate_cost(selected_model, estimate_counts, chars_per_chapter)))
 
-                # Calculate batch size based on request limits
-                # Use a minimum wait time to avoid too-frequent batches
-                min_wait = 10  # Reduced from 20 for higher tier users
-                rpm_batch_size = (effective_rpm * min_wait) // 60
+    is_free_model = selected_model is not None and selected_model.is_free
+    if is_free_model:
+        st.warning("Free models allow about 20 requests/minute and a limited number per day; "
+                   "requests run one at a time. Best for a handful of chapters.")
+    concurrency = st.slider(
+        "Parallel requests",
+        min_value=1, max_value=16, value=4,
+        disabled=is_free_model,
+        help="How many chapters are summarized at once. Lower this if you see rate-limit errors."
+    )
+    if is_free_model:
+        concurrency = 1
 
-                # Take the more conservative of the two limits
-                batch_size = max(1, min(tokens_batch_size, rpm_batch_size))
+    # --- 4. Generate -------------------------------------------------------------
+    st.markdown("### 4. Generate")
+    api_key = st.text_input(
+        "OpenRouter API Key",
+        type="password",
+        help="Get one at https://openrouter.ai/keys. Your key is not stored."
+    ).strip()
 
-                # Recalculate optimal wait time based on final batch size
-                # Calculate wait needed to stay within token limits
-                token_wait = (batch_size * tokens_per_chapter * 60) / effective_tpm if effective_tpm > 0 else min_wait
-                # Calculate wait needed to stay within request limits
-                rpm_wait = (batch_size * 60) / effective_rpm if effective_rpm > 0 else min_wait
-                # Use the larger of the two waits, but at least min_wait
-                batch_wait = max(min_wait, int(token_wait), int(rpm_wait))
+    if st.button("Generate Summaries", type="primary", disabled=not chapters):
+        if not api_key:
+            st.warning("Please enter your OpenRouter API key")
+        elif not model_id:
+            st.warning("Please choose a model")
+        elif not selected_chapters:
+            st.warning("Please select at least one chapter")
+        else:
+            processor = EPUBSummaryInserter(model_id=model_id, api_key=api_key,
+                                            chars_per_chapter=chars_per_chapter)
+            book = read_book(uploaded_file.getvalue())
+            with st.spinner(f"Summarizing {len(selected_chapters)} chapter(s) with {model_id}..."):
+                result = asyncio.run(processor.process_selected_chapters(
+                    selected_chapters, chapters, book, concurrency))
 
-                # Display calculated processing parameters
-                st.info(f"""
-                    **Processing Parameters:**
-                    - Selected Tier: {selected_tier}
-                    - Buffer Factor: {int(buffer_factor * 100)}% ({selected_buffer.split(' (')[0]})
-                    - Effective Rate Limits: {effective_rpm} RPM, {effective_tpm:,} TPM
-                    - Average chapter size: {int(avg_chapter_size):,} characters (~{int(tokens_per_chapter):,} tokens)
-                    - Batch Size: {batch_size} chapters
-                    - Wait Time: {batch_wait} seconds between batches
-                    - Characters per chapter limit: {chars_per_chapter:,}
-                    - Estimated throughput: {int(batch_size * (60/batch_wait))} chapters/minute
-                    - Total chapters: {len(chapters)}
-                """)
+            if result:
+                if result.reported_cost is not None:
+                    cost_text = format_usd(result.reported_cost)
+                elif selected_model is not None:
+                    cost_text = "~" + format_usd(tokens_cost(selected_model, result.input_tokens, result.output_tokens))
+                else:
+                    cost_text = "unknown"
+                usage_text = (f"{result.input_tokens:,} input / {result.output_tokens:,} output tokens, "
+                              f"cost {cost_text}")
 
-                # Initialize selected_chapters in session state if not present
-                if 'selected_chapters' not in st.session_state:
-                    st.session_state.selected_chapters = set()
+                total_attempted = len(selected_chapters)
+                if result.failed > 0:
+                    st.warning(f"✅ Processing complete! {result.succeeded} of {total_attempted} chapters "
+                               f"processed successfully ({result.failed} failed). {usage_text}")
+                else:
+                    st.success(f"✅ Processing complete! All {result.succeeded} chapters processed "
+                               f"successfully. {usage_text}")
 
-                # Add select_all to session state if not present
-                if 'select_all' not in st.session_state:
-                    st.session_state.select_all = False
-
-                # Handle select all checkbox
-                select_all = st.checkbox(
-                    "Select All Chapters",
-                    key='select_all',
-                    value=st.session_state.select_all
+                output_filename = f"{os.path.splitext(uploaded_file.name)[0]}_with_summaries.epub"
+                st.download_button(
+                    label="📥 Download Processed EPUB",
+                    data=result.output_bytes,
+                    file_name=output_filename,
+                    mime="application/epub+zip",
+                    type="primary"
                 )
 
-                # Update selected chapters when select all changes
-                if select_all:
-                    st.session_state.selected_chapters = set(range(len(chapters)))
-                
-                # Display individual chapter checkboxes
-                for i, (_, title, _, _) in enumerate(chapters):
-                    # Use the value from session_state.selected_chapters to set initial state
-                    is_checked = st.checkbox(
-                        title,
-                        key=f"chapter_{i}",
-                        value=(i in st.session_state.selected_chapters)
-                    )
-                    if is_checked:
-                        st.session_state.selected_chapters.add(i)
-                    else:
-                        st.session_state.selected_chapters.discard(i)
-                
-                # Generate Summaries Button
-                if st.button("Generate Summaries", type="primary"):
-                    selected_chapters = sorted(list(st.session_state.selected_chapters))
-                    
-                    if not selected_chapters:
-                        st.warning("Please select at least one chapter")
-                    else:
-                        with st.spinner("Processing EPUB file..."):
-                            result = asyncio.run(processor.process_selected_chapters(
-                                selected_chapters, 
-                                chapters, 
-                                book,
-                                batch_size,
-                                batch_wait
-                            ))
-                            
-                            if result:
-                                output_bytes, processed_summaries, successful_chapters, failed_chapters = result
-                                
-                                # Create results summary message
-                                total_attempted = len(selected_chapters)
-                                if failed_chapters > 0:
-                                    results_message = f"✅ Processing complete! {successful_chapters} of {total_attempted} chapters processed successfully ({failed_chapters} failed)"
-                                    st.warning(results_message)
-                                else:
-                                    results_message = f"✅ Processing complete! All {successful_chapters} chapters processed successfully"
-                                    st.success(results_message)
-                                
-                                # Prominent download button positioned right after results summary
-                                output_filename = f"{os.path.splitext(uploaded_file.name)[0]}_with_summaries.epub"
-                                st.download_button(
-                                    label="📥 Download Processed EPUB",
-                                    data=output_bytes,
-                                    file_name=output_filename,
-                                    mime="application/epub+zip",
-                                    type="primary"
-                                )
-                                
-                                # Add some spacing
-                                st.markdown("---")
-                                
-                                # Add review section for processed summaries in a collapsible container
-                                if processed_summaries:
-                                    with st.expander("📋 Review Generated Summaries (Optional)", expanded=False):
-                                        st.markdown("**Generated summaries for each chapter:**")
-                                        
-                                        for chapter_title, summary in processed_summaries:
-                                            st.markdown(f"**✅ {chapter_title}**")
-                                            st.markdown(summary)
-                                            st.markdown("---")
-            else:
-                st.warning("No chapters found in the uploaded EPUB file.")
-        
-        except Exception as e:
-            st.error(f"An error occurred: {str(e)}")
-    
-    # Expand the "How to use" section with troubleshooting
+                st.markdown("---")
+
+                if result.summaries:
+                    with st.expander("📋 Review Generated Summaries (Optional)", expanded=False):
+                        for _, chapter_title, summary in result.summaries:
+                            st.markdown(f"**✅ {chapter_title}**")
+                            st.markdown(summary)
+                            st.markdown("---")
+
     with st.expander("ℹ️ How to use"):
         st.markdown("""
-            1. Upload your EPUB file using the file uploader above.
-            2. Select your preferred LLM provider and model.
-            3. Enter your API key for the selected provider.
-            4. Select the text length per chapter.
-            5. Select the chapters you want to summarize.
-            6. Click 'Generate Summaries' to process your file.
-            7. Download the processed file when complete.
-            
+            1. Upload your EPUB file and pick how much of each chapter to send.
+            2. Select the chapters you want to summarize.
+            3. Choose a model. Prices are per million tokens, and the estimate covers your selected chapters.
+            4. Enter your OpenRouter API key and click 'Generate Summaries'.
+            5. Download the processed file when complete.
+
             **Troubleshooting:**
-            - Ensure your API key is valid and has sufficient credits
+            - 401 / 402 errors: check your API key and your credit balance at openrouter.ai
+            - Rate-limit errors: lower 'Parallel requests', or avoid free models for large books
             - Verify your EPUB file is under 200MB and not DRM protected
-            - If summaries fail, try processing fewer chapters at once
-            - The app includes automatic retry logic (3 attempts)
-            - Different providers have different rate limits, which may affect processing speed
-            
+            - Each chapter is retried up to 4 times with increasing waits
+
             **Security Note:** Your API key is never stored and is only used during the active session.
         """)
+
 
 if __name__ == "__main__":
     main()
